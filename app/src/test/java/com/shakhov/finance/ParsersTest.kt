@@ -48,4 +48,13 @@ class ParsersTest {
         val r = Parsers.parseReceipt("נקטרינה 19.35\nרימון 10.35\nהנחה -2.00\n7290000123456 ביצים 13.13\nסה\"כ לתשלום 40.83\nאשראי 40.83")
         assertEquals(3, r.items.size); assertEquals(8.35, r.items[1].price, 0.001); assertEquals(40.83, r.total!!, 0.001)
     }
+
+    @Test fun adIsIgnored() {
+        val ad = "טסים באל על ועוד לא הצטרפתם ל- FLY CARD?!\nמגיע לך לצבור עד 20% תוספת נקודות ויהלומים עם FLY CARD על טיסות באל על.\nמצטרפים וטסים אל על> https://go.el-al.co.il/1HFKrfbPN\nבתקנון עד 31.12.26. כפוף לרכישות בסך 10,000 ש\"ח עד 31.3.27, לתשלום מיסים. הנפקת הכרטיס בכפוף לשיקול דעתה של ישראכרט בע\"מ.\nיש לשלוח הסר למספר 0539001093 להסרה מרשימת התפוצה"
+        assertNull(Parsers.parse(ad))
+        // "לשיקול" must not be taken for a check even without ad words
+        assertNull(Parsers.parse("הנפקה לשיקול דעת הבנק בסך 500 ש\"ח"))
+        // real bank message still works
+        assertEquals(Parsers.Kind.CHECK, (Parsers.parse("♦️ 12-345:\nנפרע שיק בסך\n1,800.00 שח\nשמספרו 55501") as Parsers.Result.T).p.kind)
+    }
 }

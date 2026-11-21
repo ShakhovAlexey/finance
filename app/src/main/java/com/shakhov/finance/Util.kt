@@ -46,6 +46,20 @@ object Prefs {
     }
 }
 
+/** One-time fixes after updates. */
+object Migrate {
+    fun run(ctx: Context) {
+        val p = Prefs.get(ctx)
+        if (!p.getBoolean("fix_ads_v3", false)) {
+            val db = Db.get(ctx)
+            db.query("src=?", arrayOf(Src.SMS.toString())).filter { it.raw.isNotEmpty() && Parsers.parse(it.raw) == null }
+                .forEach { db.delete(it.id) }
+            p.edit().putBoolean("fix_ads_v3", true).apply()
+            db.changed()
+        }
+    }
+}
+
 /** One-time import of the old «Мои траты» table. */
 object Seed {
     fun run(ctx: Context) {

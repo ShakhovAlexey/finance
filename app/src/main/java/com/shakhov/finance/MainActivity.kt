@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Seed.run(this)
+        Migrate.run(this)
         setContent { App() }
         lifecycleScope.launch { Updater.check(this@MainActivity) }
     }

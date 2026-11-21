@@ -37,6 +37,17 @@ object Parsers {
     private val reDate = Regex("(?<![\\d/])(\\d{1,2})/(\\d{1,2})(?:/(\\d{2,4}))?(?![\\d/])")
     private val reDateWord = Regex("ב\\s*-?\\s*\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?")
     private val reCheckNo = Regex("שמספרו\\s*(\\d+)")
+    private val reCheckWord = Regex("(?<![\\u05D0-\\u05EA])(?:שיק|צ'ק|צ׳ק)(?![\\u05D0-\\u05EA])")
+    private val reUrl = Regex("https?://\\S+")
+    private val adWords = listOf("להסרה", "הסרה מרשימת", "לשלוח הסר", "הסר ל", "בתקנון", "מצטרפים", "הטבה", "הטבת", "מבצע", "בכפוף ל", "קופון", "הגרלה")
+
+    /** Advertising / marketing SMS: unsubscribe text, promo words, foreign links or simply too long. */
+    fun isAd(flat: String): Boolean {
+        if (adWords.any { flat.contains(it) }) return true
+        if (reUrl.findAll(flat).any { u -> listOf("cal-online", "bankhapoalim", "poalim", "isracard", "max.co.il", "leumi").none { u.value.contains(it) } }) return true
+        return flat.length > 600
+    }
+
     private val rePayments = Regex("(\\d+)\\s*תשלומים")
 
     fun clean(s: String): String =
@@ -70,6 +81,7 @@ object Parsers {
 
         val sum = reSum.find(flat) ?: return null
         if (declined.any { flat.contains(it) }) return null
+        if (isAd(flat)) return null
         val amount = num(sum.groupValues[1])
         val cur = currency(sum.groupValues.getOrNull(2))
         val date = reDate.find(flat)
@@ -102,12 +114,13 @@ object Parsers {
             )
         }
 
-        // Bank (Hapoalim and similar)
+        // Bank (Hapoalim and similar): only messages about an account
         val acc = reAccount.find(flat)?.groupValues?.get(1) ?: ""
+        if (acc.isEmpty() && !flat.contains("חשבונך") && !flat.contains("לחשבון")) return null
         val cardBill = listOf("כאל", "ויזה", "ישראכרט", "מקס", "לאומי קארד", "אמריקן אקספרס", "דיינרס", "כרטיס אשראי")
         val (type, kind) = when {
             flat.contains("משכורת") -> Types.INCOME to Kind.SALARY
-            flat.contains("שיק") || flat.contains("צ'ק") || flat.contains("צק ") -> Types.EXPENSE to Kind.CHECK
+            reCheckWord.containsMatchIn(flat) -> Types.EXPENSE to Kind.CHECK
             flat.contains("משיכת מזומן") -> Types.EXPENSE to Kind.CASH
             flat.contains("זוכה") || flat.contains("זיכוי") || flat.contains("הועבר לחשבונך") || flat.contains("הופקד") ->
                 Types.INCOME to Kind.CREDIT
