@@ -9,7 +9,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.abs
 
-class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db", null, 1) {
+class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db", null, 2) {
 
     companion object {
         @Volatile private var inst: Db? = null
@@ -32,9 +32,20 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
         db.execSQL("CREATE TABLE balances(account TEXT PRIMARY KEY, amount REAL, ts INTEGER)")
         db.execSQL("CREATE TABLE unparsed(id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, source TEXT, sender TEXT, text TEXT, hash TEXT UNIQUE)")
         db.execSQL("CREATE TABLE seen(hash TEXT PRIMARY KEY)")
+        createPlans(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {}
+    private fun createPlans(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, merchant TEXT, total REAL,
+            count INTEGER, monthly REAL, firstTs INTEGER, purchaseTs INTEGER, source TEXT, card TEXT, account TEXT,
+            category TEXT, note TEXT, purchaseTxId INTEGER)"""
+        )
+    }
+
+    override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
+        if (o < 2) createPlans(db)
+    }
 
     fun changed() { listeners.toList().forEach { runCatching { it() } } }
 
@@ -101,12 +112,31 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
             if (seen(t.hash)) return t to false
             markSeen(t.hash)
         }
-        val window = if (t.src and (Src.STATEMENT or Src.RECEIPT or Src.MANUAL) != 0) 3 * DAY else DAY + DAY / 2
+        val wide = t.src and (Src.STATEMENT or Src.RECEIPT or Src.MANUAL or Src.PLAN) != 0
+        val maxWindow = 5 * DAY
+        // an expense may also be the full-price purchase of an installment plan (type plan)
+        val types = if (t.type == Types.EXPENSE) "type IN ('${Types.EXPENSE}','${Types.PLAN}')" else "type='${t.type}'"
         val cands = query(
-            "type=? AND currency=? AND ts BETWEEN ? AND ? AND (src & ?)=0",
-            arrayOf(t.type, t.currency, (t.ts - window).toString(), (t.ts + window).toString(), t.src.toString())
-        )
-        val single = cands.filter { abs(it.amount - t.amount) < 0.005 && it.grp.isEmpty() }
+            "$types AND currency=? AND ts BETWEEN ? AND ? AND (src & ?)=0",
+            arrayOf(t.currency, (t.ts - maxWindow).toString(), (t.ts + maxWindow).toString(), t.src.toString())
+        ).filter { c ->
+            val w = when {
+                wide || c.src and Src.PLAN != 0 -> if (c.src and Src.PLAN != 0 || t.src and Src.PLAN != 0) 5 * DAY else 3 * DAY
+                c.src and (Src.STATEMENT or Src.RECEIPT or Src.MANUAL) != 0 -> 3 * DAY
+                else -> DAY + DAY / 2
+            }
+            abs(c.ts - t.ts) <= w
+        }
+        val single = cands.filter { abs(it.amount - t.amount) < 0.005 }
+            .filter {
+                when {
+                    it.grp.isEmpty() -> true
+                    // installment payment: only a statement line or a bank-account debit can confirm it, never a new card purchase
+                    it.grp.startsWith("plan:") && !it.grp.endsWith(":0") -> t.src and Src.STATEMENT != 0 || t.card.isEmpty()
+                    it.grp.startsWith("plan:") -> true
+                    else -> false
+                }
+            }
             .filter { it.card.isEmpty() || t.card.isEmpty() || it.card == t.card }
             .minByOrNull { abs(it.ts - t.ts) }
         if (single != null) {
@@ -119,13 +149,14 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
             if (single.items.isEmpty()) single.items = t.items
             if (single.merchantRu.isEmpty()) single.merchantRu = t.merchantRu
             if (t.src and (Src.SMS or Src.NOTIF_CAL or Src.NOTIF_WALLET) != 0 && single.src and Src.STATEMENT == 0) single.ts = t.ts
+            if (t.src and Src.STATEMENT != 0 && single.src and Src.PLAN != 0) single.amount = t.amount
             if (t.note.isNotEmpty() && !single.note.contains(t.note)) single.note = listOf(single.note, t.note).filter { it.isNotEmpty() }.joinToString("; ")
             single.raw = listOf(single.raw, t.raw).filter { it.isNotEmpty() }.joinToString("\n———\n").take(4000)
             update(single); changed()
             return single to false
         }
         // Split receipt groups (one card payment split into several categories)
-        val groups = cands.filter { it.grp.isNotEmpty() && abs(it.grpTotal - t.amount) < 0.005 }.groupBy { it.grp }
+        val groups = cands.filter { it.grp.isNotEmpty() && !it.grp.startsWith("plan:") && abs(it.grpTotal - t.amount) < 0.005 }.groupBy { it.grp }
         groups.values.firstOrNull()?.let { g ->
             g.forEach { it.src = it.src or t.src; if (it.card.isEmpty()) it.card = t.card; update(it) }
             changed(); return g.first() to false
@@ -209,6 +240,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
         val seen = JSONArray()
         readableDatabase.rawQuery("SELECT hash FROM seen", null).use { c -> while (c.moveToNext()) seen.put(c.getString(0)) }
         root.put("seen", seen)
+        root.put("plans", JSONArray().also { a -> Plans.all(this).forEach { a.put(Plans.toJson(it)) } })
         return root
     }
 
@@ -216,7 +248,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
         val db = writableDatabase
         db.beginTransaction()
         try {
-            listOf("tx", "rules", "balances", "words", "seen").forEach { db.delete(it, null, null) }
+            listOf("tx", "rules", "balances", "words", "seen", "plans").forEach { db.delete(it, null, null) }
             val txs = root.getJSONArray("tx")
             for (i in 0 until txs.length()) {
                 val o = txs.getJSONObject(i)
@@ -235,6 +267,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
             } }
             root.optJSONArray("words")?.let { a -> for (i in 0 until a.length()) a.getJSONArray(i).let { setWord(it.getString(0), it.getString(1)) } }
             root.optJSONArray("seen")?.let { a -> for (i in 0 until a.length()) markSeen(a.getString(i)) }
+            root.optJSONArray("plans")?.let { a -> for (i in 0 until a.length()) Plans.insertRaw(this, Plans.fromJson(a.getJSONObject(i))) }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
         changed()

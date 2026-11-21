@@ -112,6 +112,10 @@ object Ingest {
         Dict.enrich(ctx, t, p.kind)
         val (saved, isNew) = Db.get(ctx).addOrMerge(t)
         if (!isNew) return null
+        if (p.installments != 0 && saved.type == Types.EXPENSE) {
+            val plan = Plans.fromPurchase(ctx, saved, maxOf(0, p.installments))
+            return "Рассрочка ${fmtMoney(saved.amount)} · ${plan.name}" + if (plan.count == 0) " — укажи число платежей" else ""
+        }
         return "${fmtMoney(saved.amount, saved.currency)} · ${saved.merchantRu.ifEmpty { saved.merchant }.ifEmpty { saved.category }}"
     }
 

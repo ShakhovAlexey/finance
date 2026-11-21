@@ -57,4 +57,9 @@ class ParsersTest {
         // real bank message still works
         assertEquals(Parsers.Kind.CHECK, (Parsers.parse("♦️ 12-345:\nנפרע שיק בסך\n1,800.00 שח\nשמספרו 55501") as Parsers.Result.T).p.kind)
     }
+
+    @Test fun installmentsCount() {
+        val p = (Parsers.parse("היי, בכרטיס ויזה H&O המסתיים ב-1234 קיבלנו בקשה לעסקת תשלומים ב-15/11 בKSP נצרת ב-3 תשלומים בסך 900 שח.") as Parsers.Result.T).p
+        assertEquals("KSP נצרת", p.merchant); assertEquals(3, p.installments)
+    }
 }

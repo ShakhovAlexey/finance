@@ -158,7 +158,7 @@ object Parsers {
             val i = Regex("(?:^|\\s)ב-?(?=\\S)").findAll(seg).lastOrNull()
             seg = if (i != null) seg.substring(i.range.last + 1) else ""
         }
-        return seg.trim().trimEnd(',', '.')
+        return seg.replace(Regex("\\s*ב?-?\\s*\\d+\\s*תשלומים.*$"), "").trim().trimEnd(',', '.')
     }
 
     private fun bankMerchant(flat: String): String {

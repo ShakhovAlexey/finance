@@ -18,6 +18,8 @@ class DbTest {
         Calendar.getInstance().apply { set(2026, m - 1, d, h, min, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
 
     @Test fun everything() {
+        Db.get(ctx).importJson(org.json.JSONObject().put("tx", org.json.JSONArray()))
+        Prefs.get(ctx).edit().putBoolean("seeded", false).apply()
         Seed.run(ctx)
         val db = Db.get(ctx)
         val hasSeed = runCatching { ctx.assets.open("seed.json").close() }.isSuccess

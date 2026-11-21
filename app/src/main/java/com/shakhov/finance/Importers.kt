@@ -22,7 +22,9 @@ data class ImportRow(
     var include: Boolean = true,
     var reason: String = "",
     var card: String = "",
-    var installments: Int = 0
+    var installments: Int = 0,
+    var instN: Int = 0,
+    var total: Double = 0.0
 )
 
 object Importers {
@@ -118,7 +120,7 @@ object Importers {
 
     fun table(rows: List<List<String>>): List<ImportRow> {
         val out = mutableListOf<ImportRow>()
-        var dateC = -1; var merchC = -1; var amtC = -1; var noteC = -1; var cardC = -1
+        var dateC = -1; var merchC = -1; var amtC = -1; var noteC = -1; var cardC = -1; var totC = -1
         var card = ""
         for (r in rows) {
             val joined = r.joinToString(" ")
@@ -131,6 +133,7 @@ object Importers {
                 amtC = find("סכום חיוב", "סכום לחיוב", "סכום בש\"ח", "סכום")
                 noteC = find("הערות", "פירוט נוסף", "סוג עסקה", "סוג")
                 cardC = find("4 ספרות", "כרטיס")
+                totC = find("סכום עסקה", "סכום העסקה", "סכום מקורי").takeIf { it != amtC } ?: -1
                 continue
             }
             if (dateC < 0 || amtC < 0) continue
@@ -145,7 +148,9 @@ object Importers {
                 merchant = merchant,
                 note = if (inst != null) "рассрочка: платёж ${inst.groupValues[1]} из ${inst.groupValues[2]}" else note,
                 card = (if (cardC >= 0) r.getOrNull(cardC)?.filter(Char::isDigit)?.takeLast(4) else null)?.takeIf { it.length == 4 } ?: card,
-                installments = inst?.groupValues?.get(2)?.toIntOrNull() ?: 0
+                installments = inst?.groupValues?.get(2)?.toIntOrNull() ?: 0,
+                instN = inst?.groupValues?.get(1)?.toIntOrNull() ?: 0,
+                total = if (totC >= 0) abs(parseAmount(r.getOrNull(totC) ?: "") ?: 0.0) else 0.0
             )
         }
         return out
@@ -229,11 +234,7 @@ object Importers {
     private fun markKnown(ctx: Context, rows: List<ImportRow>) {
         val db = Db.get(ctx)
         rows.forEach { r ->
-            if (r.installments > 0) {
-                val key = Parsers.merchantKey(r.merchant)
-                val parent = db.query("installments!=0 AND ts<?", arrayOf(r.ts.toString())).any { Parsers.merchantKey(it.merchant) == key }
-                if (parent) { r.include = false; r.reason = "платёж рассрочки — покупка уже записана целиком" }
-            }
+            if (r.installments > 0) { r.reason = "платёж рассрочки ${r.instN} из ${r.installments}"; return@forEach }
             val near = db.query("ts BETWEEN ? AND ? AND type=?", arrayOf((r.ts - 3 * Db.DAY).toString(), (r.ts + 3 * Db.DAY).toString(), r.type))
             val same = near.firstOrNull { abs(it.amount - r.amount) < 0.005 && it.src and Src.STATEMENT != 0 }
             if (same != null) { r.include = false; r.reason = "уже есть из выписки" }
@@ -244,6 +245,7 @@ object Importers {
     fun commit(ctx: Context, rows: List<ImportRow>): Int {
         var n = 0
         rows.filter { it.include }.forEach { r ->
+            if (r.installments > 0 && r.type == Types.EXPENSE) { if (Plans.applyStatementRow(ctx, r)) n++; return@forEach }
             val t = Tx(ts = r.ts, amount = r.amount, type = r.type, merchant = r.merchant, note = r.note,
                 card = r.card, src = Src.STATEMENT, installments = 0)
             Dict.enrich(ctx, t, if (r.type == Types.TRANSFER) Parsers.Kind.CARD_BILL else if (r.type == Types.INCOME) Parsers.Kind.CREDIT else null)

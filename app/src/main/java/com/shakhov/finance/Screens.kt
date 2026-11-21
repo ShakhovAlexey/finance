@@ -65,7 +65,11 @@ fun EditDialog(orig: Tx, onClose: () -> Unit) {
         Surface(Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.92f), shape = MaterialTheme.shapes.large) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (isNew) "Новая операция" else "Операция", fontSize = 20.sp, fontWeight = FontWeight.Bold)
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                if (orig.type == Types.PLAN || orig.grp.startsWith("plan:")) Text(
+                    if (orig.type == Types.PLAN) "Покупка в рассрочку: в расходы идут ежемесячные платежи. Число платежей и сумму меняй во вкладке «Рассрочки»."
+                    else "Платёж по рассрочке. График — во вкладке «Рассрочки».",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+                if (orig.type != Types.PLAN) SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     listOf(Types.EXPENSE to "Расход", Types.INCOME to "Доход", Types.TRANSFER to "Перевод").forEachIndexed { i, (t, l) ->
                         SegmentedButton(selected = type == t, onClick = {
                             type = t; if (cat !in Cats.forType(t)) cat = Cats.forType(t).first()

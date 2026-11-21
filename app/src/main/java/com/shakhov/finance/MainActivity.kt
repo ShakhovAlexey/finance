@@ -76,6 +76,7 @@ sealed class Screen {
     data object Feed : Screen()
     data object Report : Screen()
     data object Add : Screen()
+    data object Plans : Screen()
     data object Setup : Screen()
     data object Unparsed : Screen()
     data class Preview(val rows: List<ImportRow>, val title: String) : Screen()
@@ -95,10 +96,11 @@ fun App() {
                     listOf(
                         Triple(Screen.Feed, "Лента", Icons.AutoMirrored.Filled.List),
                         Triple(Screen.Report, "Отчёт", Icons.Default.PieChart),
+                        Triple(Screen.Plans, "Рассрочки", Icons.Default.CreditCard),
                         Triple(Screen.Add, "Добавить", Icons.Default.AddCircle),
                         Triple(Screen.Setup, "Настройки", Icons.Default.Settings)
                     ).forEach { (s, label, icon) ->
-                        NavigationBarItem(selected = screen == s, onClick = { screen = s }, icon = { Icon(icon, null) }, label = { Text(label) })
+                        NavigationBarItem(selected = screen == s, onClick = { screen = s }, icon = { Icon(icon, null) }, label = { Text(label, maxLines = 1, fontSize = 11.sp) })
                     }
                 }
             }
@@ -107,6 +109,7 @@ fun App() {
                 when (val s = screen) {
                     Screen.Feed -> FeedScreen(onEdit = { editing = it }, onUnparsed = { screen = Screen.Unparsed })
                     Screen.Report -> ReportScreen(onEdit = { editing = it })
+                    Screen.Plans -> PlansScreen()
                     Screen.Add -> AddScreen(go = { screen = it }, onManual = { editing = it })
                     Screen.Setup -> SetupScreen()
                     Screen.Unparsed -> UnparsedScreen(onBack = { screen = Screen.Feed }, onManual = { editing = it })
@@ -197,11 +200,20 @@ fun TxRow(t: Tx, onClick: () -> Unit) {
                 add(t.category)
                 if (t.merchantRu.isNotEmpty() && t.merchant.isNotEmpty() && t.merchant != t.merchantRu) add(t.merchant)
                 if (t.items.isNotEmpty()) add("чек: ${t.items.size} поз.")
+                if (t.grp.startsWith("plan:") && t.type == Types.EXPENSE && t.note.isNotEmpty()) add(t.note)
             }.joinToString(" · ")
             Text(sub, fontSize = 12.sp, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        val (sign, col) = when (t.type) { Types.INCOME -> "+" to Green; Types.TRANSFER -> "↔ " to MaterialTheme.colorScheme.outline; else -> "−" to MaterialTheme.colorScheme.onSurface }
-        Text(sign + fmtMoney(t.amount, t.currency), color = col, fontWeight = FontWeight.SemiBold)
+        val (sign, col) = when (t.type) {
+            Types.INCOME -> "+" to Green
+            Types.TRANSFER -> "↔ " to MaterialTheme.colorScheme.outline
+            Types.PLAN -> "" to MaterialTheme.colorScheme.outline
+            else -> "−" to MaterialTheme.colorScheme.onSurface
+        }
+        Column(horizontalAlignment = Alignment.End) {
+            Text(sign + fmtMoney(t.amount, t.currency), color = col, fontWeight = FontWeight.SemiBold)
+            if (t.type == Types.PLAN) Text("в рассрочку", fontSize = 11.sp, color = col)
+        }
     }
 }
 

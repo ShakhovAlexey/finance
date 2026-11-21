@@ -57,6 +57,11 @@ object Migrate {
             p.edit().putBoolean("fix_ads_v3", true).apply()
             db.changed()
         }
+        if (!p.getBoolean("plans_v5", false)) {
+            Plans.migrate(ctx)
+            p.edit().putBoolean("plans_v5", true).apply()
+        }
+        Plans.syncAll(ctx)
         if (!p.getBoolean("fix_seed_grp_v4", false)) {
             // Old table split the Merkaza receipt (538,68 ₪) into 4 categories without a group mark —
             // mark it so a later SMS/statement of 538,68 merges instead of adding a duplicate.

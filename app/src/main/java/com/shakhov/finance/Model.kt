@@ -33,6 +33,8 @@ object Types {
     const val EXPENSE = "expense"
     const val INCOME = "income"
     const val TRANSFER = "transfer"
+    /** Full price of an installment purchase: shown, but not counted — monthly payments are counted instead. */
+    const val PLAN = "plan"
 }
 
 object Src {
@@ -44,6 +46,7 @@ object Src {
     const val RECEIPT = 32
     const val MANUAL = 64
     const val SEED = 128
+    const val PLAN = 256
 
     fun label(mask: Int): String {
         val l = mutableListOf<String>()
@@ -55,6 +58,7 @@ object Src {
         if (mask and RECEIPT != 0) l += "Чек"
         if (mask and MANUAL != 0) l += "Вручную"
         if (mask and SEED != 0) l += "Старая таблица"
+        if (mask and PLAN != 0) l += "График рассрочки"
         return l.joinToString(" + ")
     }
 }
