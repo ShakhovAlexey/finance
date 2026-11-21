@@ -57,6 +57,16 @@ object Migrate {
             p.edit().putBoolean("fix_ads_v3", true).apply()
             db.changed()
         }
+        if (!p.getBoolean("fix_seed_grp_v4", false)) {
+            // Old table split the Merkaza receipt (538,68 ₪) into 4 categories without a group mark —
+            // mark it so a later SMS/statement of 538,68 merges instead of adding a duplicate.
+            val db = Db.get(ctx)
+            db.query("src=? AND note LIKE '%538,68%'", arrayOf(Src.SEED.toString())).forEach {
+                it.grp = "seed-merkaza-0811"; it.grpTotal = 538.68; db.update(it)
+            }
+            p.edit().putBoolean("fix_seed_grp_v4", true).apply()
+            db.changed()
+        }
     }
 }
 
