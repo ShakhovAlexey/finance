@@ -1,0 +1,41 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Version
+        run: echo "VER=1.0.$((GITHUB_RUN_NUMBER + 1))" >> $GITHUB_ENV
+      - name: Test
+        run: ./gradlew testReleaseUnitTest --no-daemon
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      - name: Build
+        run: ./gradlew assembleRelease --no-daemon
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      - name: Rename
+        run: cp app/build/outputs/apk/release/app-release.apk MoiFinansy.apk
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VER }}
+          name: Мои финансы ${{ env.VER }}
+          body: |
+            Скачать: MoiFinansy.apk ниже. Ставится поверх старой версии, данные сохраняются.
+          files: MoiFinansy.apk
+          make_latest: true
