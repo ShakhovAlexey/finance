@@ -48,6 +48,17 @@ object Parsers {
         return flat.length > 600
     }
 
+    private val paymentCues = listOf(
+        "חויב", "חיוב", "בוצעה", "עסקה", "תשלום", "שילמת", "רכישה", "משיכה", "זיכוי", "העברה",
+        "payment", "paid", "purchase", "charged", "transaction", "оплат", "списан", "покупк", "платёж", "платеж"
+    )
+
+    /** Notification text actually talks about a payment (not just mentions a price). */
+    fun looksLikePayment(flat: String): Boolean {
+        val l = flat.lowercase()
+        return paymentCues.any { l.contains(it) }
+    }
+
     private val rePayments = Regex("(\\d+)\\s*תשלומים")
 
     fun clean(s: String): String =
@@ -201,6 +212,8 @@ object Parsers {
         val isRefund = listOf("refund", "возврат", "החזר", "זיכוי").any { lower.contains(it) }
         var merchant = clean(title)
         if (reShekel.containsMatchIn(merchant) || merchant.length > 60) merchant = ""
+        val generic = listOf("בוצעה עסקה", "עסקה חדשה", "עסקה", "תשלום", "חיוב", "payment", "оплата", "покупка", "транзакция")
+        if (generic.any { merchant.lowercase().trim().startsWith(it) }) merchant = ""
         return Parsed(
             type = if (isRefund) Types.INCOME else Types.EXPENSE,
             kind = if (isRefund) Kind.REFUND else Kind.PURCHASE,

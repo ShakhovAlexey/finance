@@ -57,6 +57,19 @@ object Migrate {
             p.edit().putBoolean("fix_ads_v3", true).apply()
             db.changed()
         }
+        if (!p.getBoolean("fix_notif_v6", false)) {
+            // remove "payments" that were really chat replies or promo pushes
+            val db = Db.get(ctx)
+            val notifOnly = listOf(Src.NOTIF_OTHER, Src.NOTIF_CAL)
+            db.query("src IN (${Src.NOTIF_OTHER},${Src.NOTIF_CAL})").filter { it.src in notifOnly }.forEach { t ->
+                val raw = Parsers.clean(t.raw)
+                if (raw.contains("Claude") || t.merchant.contains("Claude") || Parsers.isAd(raw) || Parsers.isAd(Parsers.clean(t.merchant))) db.delete(t.id)
+            }
+            db.query("merchant LIKE 'בוצעה עסקה%'").forEach { it.merchant = ""; it.merchantRu = ""; db.update(it) }
+            val enabled = p.getStringSet("pkgs", emptySet())!!.filterNot { NotifService.blocked(it) }.toSet()
+            p.edit().putStringSet("pkgs", enabled).putBoolean("fix_notif_v6", true).apply()
+            db.changed()
+        }
         if (!p.getBoolean("plans_v5", false)) {
             Plans.migrate(ctx)
             p.edit().putBoolean("plans_v5", true).apply()

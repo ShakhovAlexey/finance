@@ -76,6 +76,13 @@ class PlansTest {
         // 6) delete plan → purchase becomes a full expense again, generated payments gone
         Plans.delete(ctx, Plans.byId(db, plan.id)!!)
         assertEquals(1, db.query("type=? AND amount=900", arrayOf(Types.EXPENSE)).size)
+        // chat reply / promo push mentioning a price is not a payment
+        assertNull(Ingest.handle(ctx, "Итого вышло 819,70 ₪ за месяц", now, Src.NOTIF_OTHER, "com.some.app", "Получен ответ от Claude"))
+        assertNull(Ingest.handle(ctx, "מבצעי נובמבר ב-UGREEN עד 126 ₪", now, Src.NOTIF_OTHER, "com.ugreen", "מבצעי נובמבר"))
+        assertEquals(0, db.query("amount=819.7 OR amount=126").size)
+        // real bank-app push still recorded, generic title is not a merchant
+        assertNotNull(Ingest.handle(ctx, "שילמת 82.72 ₪ בכרטיס ••1234", now, Src.NOTIF_OTHER, "com.poalim", "בוצעה עסקה"))
+        assertEquals("", db.query("amount=82.72").single().merchant)
         // backup roundtrip keeps plans
         val n = Plans.all(db).size
         db.importJson(db.exportJson())

@@ -90,10 +90,13 @@ object Ingest {
             is Parsers.Result.B -> {
                 db.setBalance(r.b.account.ifEmpty { "Счёт" }, r.b.amount, ts); return null
             }
-            is Parsers.Result.T -> return store(ctx, r.p, ts, src, hash, text)
+            is Parsers.Result.T -> return store(ctx, r.p, ts, src, hash, if (src == Src.SMS) text else "[$sender] $title\n$text")
             null -> {
-                val p = if (src != Src.SMS) Parsers.parseWallet(title, text) else null
-                if (p != null) return store(ctx, p, ts, src, hash, "$title\n$text")
+                val all = Parsers.clean("$title $text")
+                if (src != Src.SMS && Parsers.isAd(all)) return null
+                // Google Wallet only shows payments; other apps must clearly talk about a payment
+                val p = if (src == Src.NOTIF_WALLET || (src != Src.SMS && Parsers.looksLikePayment(all))) Parsers.parseWallet(title, text) else null
+                if (p != null) return store(ctx, p, ts, src, hash, "[$sender] $title\n$text")
                 if (looksFinancial(text)) db.addUnparsed(Src.label(src), sender, (if (title.isNotEmpty()) "$title\n" else "") + text, ts)
                 return null
             }
@@ -173,11 +176,20 @@ class NotifService : NotificationListenerService() {
         val CAL = setOf("com.onoapps.cal4u", "il.co.cal.app", "com.cal.calapp")
         val BANKS = setOf("com.ideomobile.hapoalim", "com.poalim.digital", "com.leumi.leumiwallet", "com.ideomobile.discount", "com.mizrahitefahot.nh")
         val SMS_APPS = setOf("com.google.android.apps.messaging", "com.android.mms", "com.samsung.android.messaging", "com.miui.smsextra")
+        /** Never payments: chats, AI assistants, mail, browsers, shops with promo pushes. */
+        val NEVER = setOf(
+            "com.anthropic.claude", "com.openai.chatgpt", "com.google.android.apps.bard", "com.whatsapp", "com.whatsapp.w4b",
+            "org.telegram.messenger", "org.telegram.plus", "com.viber.voip", "com.facebook.orca", "com.facebook.katana",
+            "com.instagram.android", "com.google.android.gm", "com.microsoft.office.outlook", "com.android.chrome",
+            "com.alibaba.aliexpresshd", "com.amazon.mShop.android.shopping", "com.einnovation.temu", "com.zzkko",
+            "com.google.android.youtube", "com.miui.securitycenter", "com.android.vending"
+        )
+        fun blocked(pkg: String) = pkg in NEVER || pkg.startsWith("com.google.android.apps.messaging")
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
-        if (pkg == packageName || pkg in SMS_APPS) return
+        if (pkg == packageName || pkg in SMS_APPS || blocked(pkg)) return
         val ex = sbn.notification.extras
         val title = ex.getCharSequence("android.title")?.toString() ?: ""
         val text = (ex.getCharSequence("android.bigText") ?: ex.getCharSequence("android.text"))?.toString() ?: ""

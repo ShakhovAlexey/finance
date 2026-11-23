@@ -492,7 +492,7 @@ fun SetupScreen() {
         OutlinedButton(onClick = { restore.launch(arrayOf("application/json", "*/*")) }) { Text("Восстановить из копии") }
         OutlinedButton(onClick = { exportCsv.launch("finance.csv") }) { Text("Выгрузить всё в CSV") }
         HorizontalDivider()
-        val seen = remember(tick) { Prefs.seenPkgs(ctx) }
+        val seen = remember(tick) { Prefs.seenPkgs(ctx).filterKeys { !NotifService.blocked(it) } }
         if (seen.isNotEmpty()) {
             Text("Другие приложения с суммами в уведомлениях", fontWeight = FontWeight.Bold)
             Text("Включи, если это платёжное приложение (bit, Yellow, банк).", fontSize = 13.sp)
