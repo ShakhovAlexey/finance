@@ -62,4 +62,16 @@ class ParsersTest {
         val p = (Parsers.parse("היי, בכרטיס ויזה H&O המסתיים ב-1234 קיבלנו בקשה לעסקת תשלומים ב-15/11 בKSP נצרת ב-3 תשלומים בסך 900 שח.") as Parsers.Result.T).p
         assertEquals("KSP נצרת", p.merchant); assertEquals(3, p.installments)
     }
+
+    @Test fun calPush() {
+        val p = (Parsers.parse("בוצעה עסקה\nב-קשת טעמים נוף הגליל בסך ₪137.8 בכרטיס ויזה 1234, פרטים נוספים בעוד רגע באפליקציה >") as Parsers.Result.T).p
+        assertEquals("קשת טעמים נוף הגליל", p.merchant); assertEquals(137.8, p.amount, 0.001); assertEquals("1234", p.card)
+        assertTrue(Parsers.sameMerchant("מרכז המזון Merkaza נוף הגליל", "MERKAZA נוף הגליל"))
+        assertFalse(Parsers.sameMerchant("FACEBK *D8PPWEWPX4", "סטופ"))
+    }
+    @Test fun bankPdfText() {
+        val r = Importers.pdfText("## ₪10,000.00 200.00 כרטיסי אשראי ל 18/11/2026\n## ₪10,200.00 1,000.00 שיק 10/11/2026\n## ₪11,200.00 5,000.00 משכורת 09/11/2026\n## ₪6,200.00 9.00 עמלה 01/11/2026")
+        assertEquals(listOf(Types.TRANSFER, Types.EXPENSE, Types.INCOME, Types.EXPENSE), r.map { it.type })
+        assertEquals(listOf(200.0, 1000.0, 5000.0, 9.0), r.map { it.amount })
+    }
 }

@@ -112,7 +112,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
             if (seen(t.hash)) return t to false
             markSeen(t.hash)
         }
-        val wide = t.src and (Src.STATEMENT or Src.RECEIPT or Src.MANUAL or Src.PLAN) != 0
+        val wide = t.src and (Src.RECEIPT or Src.MANUAL or Src.PLAN) != 0
         val maxWindow = 5 * DAY
         // an expense may also be the full-price purchase of an installment plan (type plan)
         val types = if (t.type == Types.EXPENSE) "type IN ('${Types.EXPENSE}','${Types.PLAN}')" else "type='${t.type}'"
@@ -122,10 +122,12 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
         ).filter { c ->
             val w = when {
                 wide || c.src and Src.PLAN != 0 -> if (c.src and Src.PLAN != 0 || t.src and Src.PLAN != 0) 5 * DAY else 3 * DAY
-                c.src and (Src.STATEMENT or Src.RECEIPT or Src.MANUAL) != 0 -> 3 * DAY
+                c.src and (Src.RECEIPT or Src.MANUAL) != 0 -> 3 * DAY
                 else -> DAY + DAY / 2
             }
-            abs(c.ts - t.ts) <= w
+            abs(c.ts - t.ts) <= w &&
+                // a statement line must be the same shop (Wallet uses English names, so it is exempt)
+                (t.src != Src.STATEMENT || c.src and Src.NOTIF_WALLET != 0 || Parsers.sameMerchant(c.merchant, t.merchant))
         }
         val single = cands.filter { abs(it.amount - t.amount) < 0.005 }
             .filter {
@@ -150,6 +152,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
             if (single.merchantRu.isEmpty()) single.merchantRu = t.merchantRu
             if (t.src and (Src.SMS or Src.NOTIF_CAL or Src.NOTIF_WALLET) != 0 && single.src and Src.STATEMENT == 0) single.ts = t.ts
             if (t.src and Src.STATEMENT != 0 && single.src and Src.PLAN != 0) single.amount = t.amount
+            if (t.category == "Зарплата") single.category = t.category
             if (t.note.isNotEmpty() && !single.note.contains(t.note)) single.note = listOf(single.note, t.note).filter { it.isNotEmpty() }.joinToString("; ")
             single.raw = listOf(single.raw, t.raw).filter { it.isNotEmpty() }.joinToString("\n———\n").take(4000)
             update(single); changed()

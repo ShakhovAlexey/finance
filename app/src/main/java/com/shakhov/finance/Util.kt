@@ -9,6 +9,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.TimeUnit
+import kotlin.math.abs
 
 fun fmtMoney(v: Double, cur: String = "ILS"): String {
     val s = String.format(Locale("ru"), "%,.2f", v).replace(",00", "")
@@ -70,6 +71,7 @@ object Migrate {
             p.edit().putStringSet("pkgs", enabled).putBoolean("fix_notif_v6", true).apply()
             db.changed()
         }
+        if (!p.getBoolean("repair_v7", false)) { Repair.run(ctx); p.edit().putBoolean("repair_v7", true).apply() }
         if (!p.getBoolean("plans_v5", false)) {
             Plans.migrate(ctx)
             p.edit().putBoolean("plans_v5", true).apply()
@@ -158,4 +160,46 @@ object Backup {
 
 class BackupWorker(ctx: Context, p: WorkerParameters) : Worker(ctx, p) {
     override fun doWork(): Result = if (Backup.write(applicationContext)) Result.success() else Result.retry()
+}
+
+/** Fixes data recorded by earlier versions (Cal pushes without shop, double pushes, statement vs split receipt, installment amounts). */
+object Repair {
+    fun run(ctx: Context) {
+        val db = Db.get(ctx)
+        // 1) Cal pushes recorded without shop/card: read them again
+        db.query("merchant='' AND raw LIKE '%בוצעה עסקה%'").forEach { t ->
+            val text = t.raw.substringBefore("\n———").replace(Regex("^\\[[^]]*]\\s*"), "")
+            (Parsers.parse(text) as? Parsers.Result.T)?.p?.let { pp ->
+                t.merchant = pp.merchant; if (t.card.isEmpty()) t.card = pp.card
+                if (t.category == "Другое") { val c = t.copy(merchantRu = ""); Dict.enrich(ctx, c, pp.kind); t.category = c.category; if (t.merchantRu.isEmpty()) t.merchantRu = c.merchantRu }
+                db.update(t)
+            }
+        }
+        // 2) same push twice within 5 minutes
+        val notif = Src.NOTIF_CAL or Src.NOTIF_WALLET or Src.NOTIF_OTHER
+        val all = db.query("(src & ?)!=0", arrayOf(notif.toString()), "ts ASC")
+        val gone = mutableSetOf<Long>()
+        for (i in all.indices) for (j in i + 1 until all.size) {
+            val a = all[i]; val b = all[j]
+            if (b.ts - a.ts > 300000) break
+            if (a.id in gone || b.id in gone) continue
+            if (abs(a.amount - b.amount) < 0.005 && Parsers.sameMerchant(a.merchant, b.merchant) && b.src and notif == b.src) { db.delete(b.id); gone += b.id }
+        }
+        // 3) a statement line equal to a split receipt (e.g. Merkaza 538,68) — keep the split, drop the line
+        db.query("grp!='' AND grp NOT LIKE 'plan:%' AND grpTotal>0").groupBy { it.grp }.forEach { (_, g) ->
+            val ts = g.first().ts; val total = g.first().grpTotal
+            db.query("src=? AND grp='' AND ts BETWEEN ? AND ?", arrayOf(Src.STATEMENT.toString(), (ts - Db.DAY - Db.DAY / 2).toString(), (ts + Db.DAY + Db.DAY / 2).toString()))
+                .firstOrNull { abs(it.amount - total) < 0.005 }?.let { line ->
+                    db.delete(line.id); g.forEach { it.src = it.src or Src.STATEMENT; db.update(it) }
+                }
+        }
+        // 4) installment payments that got the full purchase price
+        Plans.all(db).forEach { pl ->
+            db.query("grp LIKE ?", arrayOf("plan:${pl.id}:%")).forEach { t ->
+                val n = t.grp.substringAfterLast(':').toIntOrNull() ?: 0
+                if (n > 0 && pl.count > 1 && t.amount > Plans.total(pl) / 2) { t.amount = Plans.payment(pl, n); db.update(t) }
+            }
+        }
+        db.changed()
+    }
 }

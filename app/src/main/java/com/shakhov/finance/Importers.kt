@@ -24,10 +24,26 @@ data class ImportRow(
     var card: String = "",
     var installments: Int = 0,
     var instN: Int = 0,
-    var total: Double = 0.0
+    var total: Double = 0.0,
+    var branch: String = "",
+    var kind: String = ""
 )
 
 object Importers {
+    /** Charge day found in the last Cal file ("עסקאות לחיוב ב-02/12/2026"). */
+    var lastChargeDay: Int? = null
+
+    private val branchCat = mapOf(
+        "מזון ומשקאות" to "Продукты", "מסעדות" to "Кафе и рестораны", "מזון מהיר" to "Кафе и рестораны",
+        "רפואה ובריאות" to "Здоровье", "פארם" to "Здоровье", "ילדים" to "Дети", "אנרגיה" to "Транспорт и авто",
+        "תחבורה" to "Транспорт и авто", "רכב" to "Транспорт и авто", "ריהוט ובית" to "Хозтовары", "ביגוד" to "Одежда",
+        "אופנה" to "Одежда", "ביטוח" to "Дом и счета", "מוסדות" to "Дом и счета", "חשמל" to "Дом и счета"
+    )
+
+    fun categoryFor(r: ImportRow): String? {
+        if (r.branch.contains("תקשורת") && r.kind.contains("הוראת קבע")) return "Подписки"
+        return branchCat.entries.firstOrNull { r.branch.contains(it.key) }?.value
+    }
 
     fun load(ctx: Context, uri: Uri, name: String): List<ImportRow> {
         val lower = name.lowercase()
@@ -40,6 +56,9 @@ object Importers {
             else -> table(csv(String(bytes, Charsets.UTF_8)))
         }
         markKnown(ctx, rows)
+        lastChargeDay?.let { d ->
+            if (d in 1..31 && d != Plans.chargeDay(ctx)) { Prefs.get(ctx).edit().putInt("calDay", d).apply(); Plans.onChargeDayChanged(ctx) }
+        }
         return rows
     }
 
@@ -118,20 +137,26 @@ object Importers {
     // ---------------- Generic table → rows (Cal export and similar) ----------------
     private val reInst = Regex("תשלום\\s*(\\d+)\\s*מתוך\\s*(\\d+)")
 
-    fun table(rows: List<List<String>>): List<ImportRow> {
+    fun table(rows0: List<List<String>>): List<ImportRow> {
+        // Cal headers are split over two lines ("סכום\nחיוב") — normalise
+        val rows = rows0.map { r -> r.map { it.replace('\n', ' ').replace(Regex("\\s+"), " ").trim() } }
         val out = mutableListOf<ImportRow>()
-        var dateC = -1; var merchC = -1; var amtC = -1; var noteC = -1; var cardC = -1; var totC = -1
+        lastChargeDay = null
+        var dateC = -1; var merchC = -1; var amtC = -1; var noteC = -1; var cardC = -1; var totC = -1; var branchC = -1; var kindC = -1
         var card = ""
         for (r in rows) {
             val joined = r.joinToString(" ")
             Regex("(?:המסתיים ב|מסתיים ב|ending|\\*{2,})\\s*-?\\s*(\\d{4})").find(joined)?.let { card = it.groupValues[1] }
+            Regex("לחיוב ב-?\\s*(\\d{1,2})/\\d{1,2}/\\d{2,4}").find(joined)?.let { lastChargeDay = it.groupValues[1].toIntOrNull() }
             val isHeader = r.any { it.contains("תאריך") } && r.any { it.contains("סכום") }
             if (isHeader) {
                 fun find(vararg keys: String) = keys.firstNotNullOfOrNull { k -> r.indexOfFirst { it.contains(k) }.takeIf { it >= 0 } } ?: -1
                 dateC = find("תאריך עסקה", "תאריך רכישה", "תאריך")
                 merchC = find("שם בית", "בית עסק", "שם העסק", "תיאור", "פירוט")
                 amtC = find("סכום חיוב", "סכום לחיוב", "סכום בש\"ח", "סכום")
-                noteC = find("הערות", "פירוט נוסף", "סוג עסקה", "סוג")
+                noteC = find("הערות", "פירוט נוסף")
+                branchC = find("ענף")
+                kindC = find("סוג עסקה", "סוג")
                 cardC = find("4 ספרות", "כרטיס")
                 totC = find("סכום עסקה", "סכום העסקה", "סכום מקורי").takeIf { it != amtC } ?: -1
                 continue
@@ -150,7 +175,9 @@ object Importers {
                 card = (if (cardC >= 0) r.getOrNull(cardC)?.filter(Char::isDigit)?.takeLast(4) else null)?.takeIf { it.length == 4 } ?: card,
                 installments = inst?.groupValues?.get(2)?.toIntOrNull() ?: 0,
                 instN = inst?.groupValues?.get(1)?.toIntOrNull() ?: 0,
-                total = if (totC >= 0) abs(parseAmount(r.getOrNull(totC) ?: "") ?: 0.0) else 0.0
+                total = if (totC >= 0) abs(parseAmount(r.getOrNull(totC) ?: "") ?: 0.0) else 0.0,
+                branch = if (branchC >= 0) r.getOrNull(branchC) ?: "" else "",
+                kind = if (kindC >= 0) r.getOrNull(kindC) ?: "" else ""
             )
         }
         return out
@@ -191,41 +218,51 @@ object Importers {
     }
 
     fun pdfText(text: String): List<ImportRow> {
-        data class L(val ts: Long, val nums: List<Double>, val desc: String)
+        data class L(val ts: Long, val amount: Double, val balance: Double?, val desc: String)
+        val reBal = Regex("₪\\s?(-?\\d{1,3}(?:,\\d{3})*\\.\\d{2})|(-?\\d{1,3}(?:,\\d{3})*\\.\\d{2})\\s?₪")
         val lines = text.lines().mapNotNull { raw ->
             val line = Parsers.clean(raw)
             val d = reD.find(line) ?: return@mapNotNull null
-            val nums = reA.findAll(line).map { m ->
+            // the running balance is printed with ₪ (Hapoalim); the other number is the operation
+            val balM = reBal.find(line)
+            val balance = balM?.let { (it.groupValues[1].ifEmpty { it.groupValues[2] }).replace(",", "").toDouble() }
+            var rest = line
+            if (balM != null) rest = rest.replace(balM.value, " ")
+            val nums = reA.findAll(rest).map { m ->
                 val v = m.value; val neg = v.startsWith("-") || v.endsWith("-")
                 v.trim('-').replace(",", "").toDouble() * if (neg) -1 else 1
             }.toList()
             if (nums.isEmpty()) return@mapNotNull null
-            var desc = line
+            // without a ₪ mark: last number is the balance when there are two
+            val (amount, bal) = if (balance != null) nums.first() to balance
+                else if (nums.size >= 2) nums.first() to nums.last() else nums.first() to null
+            var desc = rest
             reD.findAll(line).forEach { desc = desc.replace(it.value, " ") }
-            reA.findAll(line).forEach { desc = desc.replace(it.value, " ") }
-            desc = desc.replace(Regex("\\b\\d{3,}\\b"), " ").replace(Regex("\\s+"), " ").trim()
+            reA.findAll(rest).forEach { desc = desc.replace(it.value, " ") }
+            desc = desc.replace(Regex("##|₪"), " ").replace(Regex("\\b\\d{3,}\\b"), " ").replace(Regex("\\s+"), " ").trim()
             if (reversedHints.any { desc.contains(it) }) desc = desc.split(" ").reversed().joinToString(" ") { it.reversed() }
-            L(Importers.parseDate(d.value) ?: return@mapNotNull null, nums, desc)
+            L(Importers.parseDate(d.value) ?: return@mapNotNull null, abs(amount), bal, desc)
         }
         val out = mutableListOf<ImportRow>()
         lines.forEachIndexed { i, l ->
-            val amt = abs(l.nums.first())
-            val bal = if (l.nums.size >= 2) l.nums.last() else null
+            val amt = l.amount
             var type: String? = null
-            if (bal != null) {
-                val prev = lines.getOrNull(i - 1)?.takeIf { it.nums.size >= 2 }?.nums?.last()
-                val next = lines.getOrNull(i + 1)?.takeIf { it.nums.size >= 2 }?.nums?.last()
+            if (l.balance != null) {
+                val prev = lines.getOrNull(i - 1)?.balance
+                val next = lines.getOrNull(i + 1)?.balance
                 type = when {
-                    prev != null && abs(bal - prev - amt) < 0.01 -> Types.INCOME
-                    prev != null && abs(prev - bal - amt) < 0.01 -> Types.EXPENSE
-                    next != null && abs(bal - next - amt) < 0.01 -> Types.INCOME
-                    next != null && abs(next - bal - amt) < 0.01 -> Types.EXPENSE
+                    prev != null && abs(l.balance - prev - amt) < 0.01 -> Types.INCOME
+                    prev != null && abs(prev - l.balance - amt) < 0.01 -> Types.EXPENSE
+                    next != null && abs(l.balance - next - amt) < 0.01 -> Types.INCOME
+                    next != null && abs(next - l.balance - amt) < 0.01 -> Types.EXPENSE
                     else -> null
                 }
             }
             if (type == null) type = if (listOf("משכורת", "זיכוי", "העברה מ", "הפקדה").any { l.desc.contains(it) }) Types.INCOME else Types.EXPENSE
-            if (type == Types.EXPENSE && listOf("כאל", "ויזה", "ישראכרט", "מקס", "כרטיסי אשראי").any { l.desc.contains(it) }) type = Types.TRANSFER
-            out += ImportRow(l.ts, amt, type, l.desc, "")
+            if (type == Types.EXPENSE && listOf("כאל", "ויזה", "ישראכרט", "מקס", "כרטיסי אשראי", "אמריקן").any { l.desc.contains(it) }) type = Types.TRANSFER
+            val row = ImportRow(l.ts, amt, type, l.desc, "")
+            if (type == Types.TRANSFER) row.reason = "погашение карты — не расход"
+            out += row
         }
         return out
     }
@@ -235,24 +272,55 @@ object Importers {
         val db = Db.get(ctx)
         rows.forEach { r ->
             if (r.installments > 0) { r.reason = "платёж рассрочки ${r.instN} из ${r.installments}"; return@forEach }
-            val near = db.query("ts BETWEEN ? AND ? AND type=?", arrayOf((r.ts - 3 * Db.DAY).toString(), (r.ts + 3 * Db.DAY).toString(), r.type))
-            val same = near.firstOrNull { abs(it.amount - r.amount) < 0.005 && it.src and Src.STATEMENT != 0 }
-            if (same != null) { r.include = false; r.reason = "уже есть из выписки" }
-            else if (near.any { abs(it.amount - r.amount) < 0.005 }) r.reason = "склеится с уже записанной"
+            if (r.card.isNotEmpty()) return@forEach  // card statement replaces the previous one of the same card on import
+            val near = db.query("ts BETWEEN ? AND ? AND type=?", arrayOf((r.ts - Db.DAY - Db.DAY / 2).toString(), (r.ts + Db.DAY + Db.DAY / 2).toString(), r.type))
+                .filter { abs(it.amount - r.amount) < 0.005 && Parsers.sameMerchant(it.merchant, r.merchant) }
+            if (near.any { it.src and Src.STATEMENT != 0 }) { r.include = false; r.reason = "уже есть из выписки" }
+            else if (near.isNotEmpty()) r.reason = "склеится с уже записанной"
         }
     }
 
     fun commit(ctx: Context, rows: List<ImportRow>): Int {
         var n = 0
+        val db = Db.get(ctx)
+        // Re-importing a card statement: forget what earlier statements of this card said for these dates
+        rows.filter { it.card.isNotEmpty() && it.installments == 0 }.groupBy { it.card }.forEach { (card, rs) ->
+            val from = dayStart(rs.minOf { it.ts }); val to = dayStart(rs.maxOf { it.ts }) + Db.DAY
+            db.query("ts>=? AND ts<? AND (src & ?)!=0 AND (card=? OR card='' OR (grp!='' AND grp NOT LIKE 'plan:%'))", arrayOf(from.toString(), to.toString(), Src.STATEMENT.toString(), card))
+                .forEach { t -> if (t.src == Src.STATEMENT) db.delete(t.id) else { t.src = t.src and Src.STATEMENT.inv(); db.update(t) } }
+        }
+        rows.filter { it.card.isNotEmpty() && it.installments > 0 }.forEach { r ->
+            db.query("grp LIKE 'plan:%' AND (src & ?)!=0 AND card=?", arrayOf(Src.STATEMENT.toString(), r.card))
+                .forEach { t -> t.src = t.src and Src.STATEMENT.inv(); db.update(t) }
+        }
         rows.filter { it.include }.forEach { r ->
             if (r.installments > 0 && r.type == Types.EXPENSE) { if (Plans.applyStatementRow(ctx, r)) n++; return@forEach }
             val t = Tx(ts = r.ts, amount = r.amount, type = r.type, merchant = r.merchant, note = r.note,
                 card = r.card, src = Src.STATEMENT, installments = 0)
             Dict.enrich(ctx, t, if (r.type == Types.TRANSFER) Parsers.Kind.CARD_BILL else if (r.type == Types.INCOME) Parsers.Kind.CREDIT else null)
+            if (t.category == "Другое" && r.type == Types.EXPENSE) categoryFor(r)?.let { t.category = it }
             if (r.type == Types.INCOME && r.merchant.contains("משכורת")) t.category = "Зарплата"
             if (Db.get(ctx).addOrMerge(t).second) n++
         }
+        Transfers.link(ctx)
         Backup.schedule(ctx)
         return n
+    }
+}
+
+/** Money moved between own accounts: a "העברה" debit on one account and an equal credit on another the same day. */
+object Transfers {
+    fun link(ctx: Context) {
+        val db = Db.get(ctx)
+        val since = System.currentTimeMillis() - 120 * Db.DAY
+        val incomes = db.query("type=? AND ts>? AND category='Поступления'", arrayOf(Types.INCOME, since.toString()))
+        val outs = db.query("type=? AND ts>?", arrayOf(Types.EXPENSE, since.toString()))
+            .filter { it.card.isEmpty() && (it.merchant.contains("העברה") || it.raw.contains("הועבר מחשבונך")) }
+        incomes.forEach { inc ->
+            val o = outs.firstOrNull { abs(it.amount - inc.amount) < 0.005 && abs(it.ts - inc.ts) <= Db.DAY + Db.DAY / 2 && (it.account.isEmpty() || it.account != inc.account) && it.type == Types.EXPENSE }
+                ?: return@forEach
+            listOf(inc, o).forEach { it.type = Types.TRANSFER; it.category = "Перевод между счетами"; db.update(it) }
+        }
+        db.changed()
     }
 }

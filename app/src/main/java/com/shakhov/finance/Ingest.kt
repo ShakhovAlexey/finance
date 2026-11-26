@@ -12,6 +12,7 @@ import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationCompat
 import org.json.JSONObject
 import kotlin.concurrent.thread
+import kotlin.math.abs
 
 /** Russian names + categories: user rules first, then built-in dictionary, then transliteration. */
 object Dict {
@@ -113,8 +114,15 @@ object Ingest {
             hash = hash, installments = p.installments
         )
         Dict.enrich(ctx, t, p.kind)
+        if (src != Src.SMS) {
+            // apps sometimes post the same payment twice within a minute or two
+            val dup = Db.get(ctx).query("(src & ?)!=0 AND ts BETWEEN ? AND ?", arrayOf(src.toString(), (t.ts - 300000).toString(), (t.ts + 300000).toString()))
+                .any { abs(it.amount - t.amount) < 0.005 && Parsers.sameMerchant(it.merchant, t.merchant) }
+            if (dup) return null
+        }
         val (saved, isNew) = Db.get(ctx).addOrMerge(t)
         if (!isNew) return null
+        if (saved.type == Types.INCOME && saved.account.isNotEmpty()) Transfers.link(ctx)
         if (p.installments != 0 && saved.type == Types.EXPENSE) {
             val plan = Plans.fromPurchase(ctx, saved, maxOf(0, p.installments))
             return "Рассрочка ${fmtMoney(saved.amount)} · ${plan.name}" + if (plan.count == 0) " — укажи число платежей" else ""

@@ -145,7 +145,7 @@ object Plans {
             if (n == 0) return@forEach
             if (t.src == Src.PLAN) db.delete(t.id)
             else {
-                if (n > p.count) { t.grp = ""; t.src = t.src and Src.PLAN.inv() }
+                if (n > p.count) { t.grp = ""; t.src = t.src and Src.PLAN.inv() } else t.ts = paymentTs(p, n)
                 t.category = p.category; t.merchantRu = p.name; t.note = "платёж $n из ${p.count}"
                 db.update(t)
             }

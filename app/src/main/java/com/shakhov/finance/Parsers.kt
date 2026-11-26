@@ -37,6 +37,17 @@ object Parsers {
     private val reDate = Regex("(?<![\\d/])(\\d{1,2})/(\\d{1,2})(?:/(\\d{2,4}))?(?![\\d/])")
     private val reDateWord = Regex("ב\\s*-?\\s*\\d{1,2}/\\d{1,2}(?:/\\d{2,4})?")
     private val reCheckNo = Regex("שמספרו\\s*(\\d+)")
+    private val reCalPush = Regex("בוצעה עסקה\\s*ב-?\\s*(.+?)\\s+בסך\\s*₪?\\s*$AMOUNT\\s*(?:ש\"ח|₪)?\\s*בכרטיס[^\\d]{0,30}(\\d{4})")
+
+    /** Same shop written two ways (Cal SMS vs statement, old table vs statement)? Empty name is compatible with anything. */
+    fun sameMerchant(a: String, b: String): Boolean {
+        val ka = merchantKey(a); val kb = merchantKey(b)
+        if (ka.isEmpty() || kb.isEmpty()) return true
+        if (ka.startsWith(kb.take(4)) || kb.startsWith(ka.take(4))) return true
+        val wa = ka.split(" ").filter { it.length >= 3 }.toSet()
+        return kb.split(" ").any { it.length >= 3 && it in wa }
+    }
+
     private val reCheckWord = Regex("(?<![\\u05D0-\\u05EA])(?:שיק|צ'ק|צ׳ק)(?![\\u05D0-\\u05EA])")
     private val reUrl = Regex("https?://\\S+")
     private val adWords = listOf("להסרה", "הסרה מרשימת", "לשלוח הסר", "הסר ל", "בתקנון", "מצטרפים", "הטבה", "הטבת", "מבצע", "בכפוף ל", "קופון", "הגרלה")
@@ -90,6 +101,12 @@ object Parsers {
             return Result.B(Balance(acc, v))
         }
 
+        // Cal app push: "בוצעה עסקה ב-סטופ בסך ₪55 בכרטיס ויזה 1234"
+        reCalPush.find(flat)?.let { m ->
+            if (declined.any { flat.contains(it) }) return null
+            return Result.T(Parsed(type = Types.EXPENSE, kind = Kind.PURCHASE, amount = num(m.groupValues[2]), currency = "ILS",
+                day = null, month = null, merchant = m.groupValues[1].trim(), card = m.groupValues[3], account = "", note = "", bank = "Cal"))
+        }
         val sum = reSum.find(flat) ?: return null
         if (declined.any { flat.contains(it) }) return null
         if (isAd(flat)) return null
