@@ -130,6 +130,8 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
                 (t.src != Src.STATEMENT || c.src and Src.NOTIF_WALLET != 0 || Parsers.sameMerchant(c.merchant, t.merchant))
         }
         val single = cands.filter { abs(it.amount - t.amount) < 0.005 }
+            // money arriving on the joint account is not the same record as the transfer that sent it
+            .filter { it.category != Transfers.ALIMONY || Transfers.isCredit(t) }
             .filter {
                 when {
                     it.grp.isEmpty() -> true
