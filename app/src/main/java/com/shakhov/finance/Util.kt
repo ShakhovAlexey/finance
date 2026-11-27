@@ -72,6 +72,12 @@ object Migrate {
             db.changed()
         }
         if (!p.getBoolean("repair_v7", false)) { Repair.run(ctx); p.edit().putBoolean("repair_v7", true).apply() }
+        if (!p.getBoolean("max_v8", false)) {
+            val db = Db.get(ctx)
+            db.query("type IN (?,?)", arrayOf(Types.TRANSFER, Types.EXPENSE)).filter { Max.isMax(it.merchant) || (it.card.isEmpty() && Max.isMax(it.raw)) }
+                .forEach { Max.apply(it); db.update(it) }
+            p.edit().putBoolean("max_v8", true).apply(); db.changed()
+        }
         if (!p.getBoolean("plans_v5", false)) {
             Plans.migrate(ctx)
             p.edit().putBoolean("plans_v5", true).apply()

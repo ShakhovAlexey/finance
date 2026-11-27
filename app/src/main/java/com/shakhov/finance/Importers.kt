@@ -259,7 +259,7 @@ object Importers {
                 }
             }
             if (type == null) type = if (listOf("משכורת", "זיכוי", "העברה מ", "הפקדה").any { l.desc.contains(it) }) Types.INCOME else Types.EXPENSE
-            if (type == Types.EXPENSE && listOf("כאל", "ויזה", "ישראכרט", "מקס", "כרטיסי אשראי", "אמריקן").any { l.desc.contains(it) }) type = Types.TRANSFER
+            if (type == Types.EXPENSE && listOf("כאל", "ויזה", "ישראכרט", "כרטיסי אשראי", "אמריקן").any { l.desc.contains(it) } && !Max.isMax(l.desc)) type = Types.TRANSFER
             val row = ImportRow(l.ts, amt, type, l.desc, "")
             if (type == Types.TRANSFER) row.reason = "погашение карты — не расход"
             out += row
@@ -299,6 +299,7 @@ object Importers {
                 card = r.card, src = Src.STATEMENT, installments = 0)
             Dict.enrich(ctx, t, if (r.type == Types.TRANSFER) Parsers.Kind.CARD_BILL else if (r.type == Types.INCOME) Parsers.Kind.CREDIT else null)
             if (t.category == "Другое" && r.type == Types.EXPENSE) categoryFor(r)?.let { t.category = it }
+            Max.apply(t)
             if (r.type == Types.INCOME && r.merchant.contains("משכורת")) t.category = "Зарплата"
             if (Db.get(ctx).addOrMerge(t).second) n++
         }

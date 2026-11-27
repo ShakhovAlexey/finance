@@ -114,6 +114,7 @@ object Ingest {
             hash = hash, installments = p.installments
         )
         Dict.enrich(ctx, t, p.kind)
+        Max.apply(t)
         if (src != Src.SMS) {
             // apps sometimes post the same payment twice within a minute or two
             val dup = Db.get(ctx).query("(src & ?)!=0 AND ts BETWEEN ? AND ?", arrayOf(src.toString(), (t.ts - 300000).toString(), (t.ts + 300000).toString()))

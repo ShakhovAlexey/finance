@@ -72,6 +72,9 @@ class ParsersTest {
     @Test fun bankPdfText() {
         val r = Importers.pdfText("## ₪10,000.00 200.00 כרטיסי אשראי ל 18/11/2026\n## ₪10,200.00 1,000.00 שיק 10/11/2026\n## ₪11,200.00 5,000.00 משכורת 09/11/2026\n## ₪6,200.00 9.00 עמלה 01/11/2026")
         assertEquals(listOf(Types.TRANSFER, Types.EXPENSE, Types.INCOME, Types.EXPENSE), r.map { it.type })
+        assertEquals(Types.EXPENSE, Importers.pdfText("## ₪10,000.00 868.62 מקס 10/11/2026\n## ₪10,868.62 1.00 x 09/11/2026").first().type)
+        assertEquals(Types.EXPENSE, (Parsers.parse("♦️ 12-345:\nחשבונך חויב בסך 868.62 ש\"ח לטובת מקס") as Parsers.Result.T).p.type)
+        assertEquals(Types.TRANSFER, (Parsers.parse("♦️ 12-345:\nחשבונך חויב בסך 5,488.56 ש\"ח לטובת כאל") as Parsers.Result.T).p.type)
         assertEquals(listOf(200.0, 1000.0, 5000.0, 9.0), r.map { it.amount })
     }
 }

@@ -145,7 +145,7 @@ object Parsers {
         // Bank (Hapoalim and similar): only messages about an account
         val acc = reAccount.find(flat)?.groupValues?.get(1) ?: ""
         if (acc.isEmpty() && !flat.contains("חשבונך") && !flat.contains("לחשבון")) return null
-        val cardBill = listOf("כאל", "ויזה", "ישראכרט", "מקס", "לאומי קארד", "אמריקן אקספרס", "דיינרס", "כרטיס אשראי")
+        val cardBill = listOf("כאל", "ויזה", "ישראכרט", "לאומי קארד", "אמריקן אקספרס", "דיינרס", "כרטיס אשראי")
         val (type, kind) = when {
             flat.contains("משכורת") -> Types.INCOME to Kind.SALARY
             reCheckWord.containsMatchIn(flat) -> Types.EXPENSE to Kind.CHECK
@@ -153,7 +153,7 @@ object Parsers {
             flat.contains("זוכה") || flat.contains("זיכוי") || flat.contains("הועבר לחשבונך") || flat.contains("הופקד") ->
                 Types.INCOME to Kind.CREDIT
             flat.contains("חויב") || flat.contains("חיוב") || flat.contains("הוראת קבע") || flat.contains("הועבר מחשבונך") || flat.contains("העברה") ->
-                if (cardBill.any { flat.contains(it) }) Types.TRANSFER to Kind.CARD_BILL else Types.EXPENSE to Kind.DEBIT
+                if (cardBill.any { flat.contains(it) } && !Max.isMax(flat)) Types.TRANSFER to Kind.CARD_BILL else Types.EXPENSE to Kind.DEBIT
             else -> return null
         }
         val note = when (kind) {
@@ -325,4 +325,16 @@ object Parsers {
     fun merchantKey(m: String): String =
         clean(m).lowercase().replace(Regex("[*#].*$"), "").replace(Regex("\\d{3,}"), "")
             .replace(Regex("[^\\p{L}\\d ]"), " ").replace(Regex("\\s+"), " ").trim()
+}
+
+/** Max card holds only standing payments (car insurance, health fund, arnona) and is not tracked item by item,
+ *  so its monthly debit from the bank account is the expense itself — not a card-bill transfer like Cal. */
+object Max {
+    const val RU = "Max: страховка авто, больничная касса, арнона"
+    fun isMax(s: String) = Regex("(?<![\\u05D0-\\u05EA])מקס(?![\\u05D0-\\u05EA])").containsMatchIn(s) || s.contains("max.co.il", true)
+    fun apply(t: Tx) {
+        if (!isMax(t.merchant) && !isMax(t.raw)) return
+        if (t.type == Types.TRANSFER) t.type = Types.EXPENSE
+        if (t.type == Types.EXPENSE) { t.category = "Дом и счета"; if (t.merchant.isEmpty()) t.merchant = "מקס"; t.merchantRu = RU }
+    }
 }
