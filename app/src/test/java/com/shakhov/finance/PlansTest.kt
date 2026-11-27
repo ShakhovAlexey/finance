@@ -83,6 +83,13 @@ class PlansTest {
         // real bank-app push still recorded, generic title is not a merchant
         assertNotNull(Ingest.handle(ctx, "שילמת 82.72 ₪ בכרטיס ••1234", now, Src.NOTIF_OTHER, "com.poalim", "בוצעה עסקה"))
         assertEquals("", db.query("amount=82.72").single().merchant)
+        // alimony: credit to the joint account = expense, the matching debit from the main account = transfer
+        Prefs.get(ctx).edit().putString("jointAccount", "12-999").apply()
+        Ingest.handle(ctx, "♦️ 12-999:\nחשבונך זוכה בסך\n1,500.00 ש\"ח.", now - 7200000, Src.SMS, "Poalim")
+        Importers.commit(ctx, listOf(ImportRow(ts = now - 3600000, amount = 1500.0, type = Types.EXPENSE, merchant = "העברה-נייד", note = "")))
+        val al = db.query("amount=1500")
+        assertEquals(1, al.count { it.type == Types.EXPENSE && it.category == Transfers.ALIMONY })
+        assertEquals(1, al.count { it.type == Types.TRANSFER })
         // backup roundtrip keeps plans
         val n = Plans.all(db).size
         db.importJson(db.exportJson())

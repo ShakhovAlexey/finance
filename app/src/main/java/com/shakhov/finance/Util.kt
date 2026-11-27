@@ -72,6 +72,7 @@ object Migrate {
             db.changed()
         }
         if (!p.getBoolean("repair_v7", false)) { Repair.run(ctx); p.edit().putBoolean("repair_v7", true).apply() }
+        Transfers.link(ctx)
         if (!p.getBoolean("max_v8", false)) {
             val db = Db.get(ctx)
             db.query("type IN (?,?)", arrayOf(Types.TRANSFER, Types.EXPENSE)).filter { Max.isMax(it.merchant) || (it.card.isEmpty() && Max.isMax(it.raw)) }

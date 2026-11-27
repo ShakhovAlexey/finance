@@ -153,8 +153,17 @@ fun FeedScreen(onEdit: (Tx) -> Unit, onUnparsed: () -> Unit) {
                 Column(Modifier.padding(14.dp)) {
                     Row { Text("Расходы", Modifier.weight(1f)); Text(fmtMoney(expenseTotal(list)), color = Red, fontWeight = FontWeight.Bold) }
                     Row { Text("Доходы", Modifier.weight(1f)); Text(fmtMoney(incomeTotal(list)), color = Green, fontWeight = FontWeight.Bold) }
+                    val inc = incomeTotal(list); val rest = inc - expenseTotal(list)
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    Row {
+                        Text("Остаток с дохода", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
+                        Text((if (rest < 0) "−" else "") + fmtMoney(kotlin.math.abs(rest)), color = if (rest < 0) Red else Green, fontWeight = FontWeight.Bold)
+                    }
+                    if (inc > 0) Text("потрачено ${Math.round(expenseTotal(list) * 100 / inc)}% дохода", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                    if (balances.isNotEmpty()) Spacer(Modifier.height(4.dp))
                     balances.forEach { (acc, amt, ts) ->
-                        Row { Text("Счёт $acc · ${fmtDate(ts, "d.MM")}", Modifier.weight(1f), fontSize = 13.sp); Text(fmtMoney(amt), fontSize = 13.sp) }
+                        val jointMark = if (acc == Transfers.joint(ctx)) " (общий)" else ""
+                        Row { Text("Счёт $acc$jointMark · ${fmtDate(ts, "d.MM")}", Modifier.weight(1f), fontSize = 13.sp); Text(fmtMoney(amt), fontSize = 13.sp) }
                     }
                 }
             }
@@ -478,6 +487,24 @@ fun SetupScreen() {
                 notify = it; prefs.edit().putBoolean("notify", it).apply()
                 if (it && Build.VERSION.SDK_INT >= 33) postPerm.launch(Manifest.permission.POST_NOTIFICATIONS)
             })
+        }
+        HorizontalDivider()
+        Text("Общий счёт с бывшей женой (алименты)", fontWeight = FontWeight.Bold)
+        Text("Что приходит на этот счёт — это твои алименты: считается расходом «Алименты», а не доходом. Перевод с основного счёта не задваивается.", fontSize = 13.sp)
+        val accounts = remember(v) { Transfers.accounts(ctx) }
+        var joint by remember { mutableStateOf(Transfers.joint(ctx)) }
+        if (accounts.isEmpty()) Text("Счета появятся после первой СМС банка.", fontSize = 13.sp)
+        (listOf("") + accounts).forEach { acc ->
+            Row(Modifier.fillMaxWidth().clickable {
+                joint = acc; prefs.edit().putString("jointAccount", acc).apply()
+                // un-mark old alimony if the account was switched off
+                if (acc.isEmpty()) Db.get(ctx).query("category=?", arrayOf(Transfers.ALIMONY)).filter { it.account.isNotEmpty() }
+                    .forEach { it.type = Types.TRANSFER; it.category = "Перевод между счетами"; Db.get(ctx).update(it) }
+                Transfers.link(ctx); Backup.schedule(ctx)
+            }, verticalAlignment = Alignment.CenterVertically) {
+                RadioButton(joint == acc, null)
+                Text(if (acc.isEmpty()) "Нет общего счёта" else "Счёт $acc")
+            }
         }
         HorizontalDivider()
         Text("Облачная копия", fontWeight = FontWeight.Bold)

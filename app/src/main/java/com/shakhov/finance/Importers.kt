@@ -309,19 +309,46 @@ object Importers {
     }
 }
 
-/** Money moved between own accounts: a "העברה" debit on one account and an equal credit on another the same day. */
+/**
+ * Money moved between own accounts.
+ * The joint account with the ex-wife (chosen in Settings) is special: money that lands there is alimony — an expense —
+ * and the matching "העברה" debit from the main account is then just a transfer (counted once).
+ */
 object Transfers {
+    const val ALIMONY = "Алименты"
+    const val ALIMONY_RU = "Алименты (на общий счёт)"
+
+    fun joint(ctx: Context) = Prefs.get(ctx).getString("jointAccount", "") ?: ""
+
+    fun isCredit(t: Tx) = t.card.isEmpty() && (t.type == Types.INCOME || t.raw.contains("זוכה") || t.raw.contains("זיכוי") || t.category == ALIMONY)
+
     fun link(ctx: Context) {
         val db = Db.get(ctx)
-        val since = System.currentTimeMillis() - 120 * Db.DAY
-        val incomes = db.query("type=? AND ts>? AND category='Поступления'", arrayOf(Types.INCOME, since.toString()))
-        val outs = db.query("type=? AND ts>?", arrayOf(Types.EXPENSE, since.toString()))
-            .filter { it.card.isEmpty() && (it.merchant.contains("העברה") || it.raw.contains("הועבר מחשבונך")) }
-        incomes.forEach { inc ->
-            val o = outs.firstOrNull { abs(it.amount - inc.amount) < 0.005 && abs(it.ts - inc.ts) <= Db.DAY + Db.DAY / 2 && (it.account.isEmpty() || it.account != inc.account) && it.type == Types.EXPENSE }
+        val joint = joint(ctx)
+        val since = System.currentTimeMillis() - 400 * Db.DAY
+        // 1) credits to the joint account → alimony expense
+        if (joint.isNotEmpty()) db.query("account=? AND ts>? AND type IN (?,?,?)", arrayOf(joint, since.toString(), Types.INCOME, Types.TRANSFER, Types.EXPENSE))
+            .filter { isCredit(it) && it.category != "Зарплата" }
+            .forEach { it.type = Types.EXPENSE; it.category = ALIMONY; if (it.merchantRu.isEmpty() || it.merchantRu == "Перевод между счетами") it.merchantRu = ALIMONY_RU; db.update(it) }
+        // 2) the debit side of a move between own accounts
+        val outs = db.query("ts>? AND type IN (?,?)", arrayOf(since.toString(), Types.EXPENSE, Types.TRANSFER))
+            .filter { it.card.isEmpty() && it.category != ALIMONY && (it.merchant.contains("העברה") || it.raw.contains("הועבר מחשבונך")) }
+        val credits = db.query("ts>? AND card='' AND account!='' AND (category=? OR (type=? AND category='Поступления') OR category='Перевод между счетами')",
+            arrayOf(since.toString(), ALIMONY, Types.INCOME))
+        credits.forEach { c ->
+            val o = outs.firstOrNull { abs(it.amount - c.amount) < 0.005 && abs(it.ts - c.ts) <= Db.DAY + Db.DAY / 2 && it.id != c.id && (it.account.isEmpty() || it.account != c.account) }
                 ?: return@forEach
-            listOf(inc, o).forEach { it.type = Types.TRANSFER; it.category = "Перевод между счетами"; db.update(it) }
+            o.type = Types.TRANSFER; o.category = "Перевод между счетами"; db.update(o)
+            if (c.category != ALIMONY) { c.type = Types.TRANSFER; c.category = "Перевод между счетами"; db.update(c) }
         }
         db.changed()
+    }
+
+    /** Accounts seen in balances or operations — for the joint-account picker. */
+    fun accounts(ctx: Context): List<String> {
+        val db = Db.get(ctx)
+        val l = db.balances().map { it.first }.toMutableSet()
+        db.readableDatabase.rawQuery("SELECT DISTINCT account FROM tx WHERE account!=''", null).use { c -> while (c.moveToNext()) l += c.getString(0) }
+        return l.filter { it != "Счёт" }.sorted()
     }
 }
