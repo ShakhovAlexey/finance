@@ -40,9 +40,10 @@ class FeaturesTest {
         val now = System.currentTimeMillis()
         val d = java.util.Calendar.getInstance().get(java.util.Calendar.DAY_OF_MONTH)
         val mo = java.util.Calendar.getInstance().get(java.util.Calendar.MONTH) + 1
-        Ingest.handle(ctx, "בוצעה עסקה\nב-סטופ בסך ₪55 בכרטיס ויזה 1234, פרטים", now - 3 * 3600000, Src.NOTIF_CAL, "cal", "")
-        Ingest.handle(ctx, "בוצעה עסקה\nב-טסט פיקס בסך ₪80 בכרטיס ויזה 1234, פרטים", now - 2 * 3600000, Src.NOTIF_CAL, "cal", "")
-        val day = dayStart(now) + 12 * 3600000L
+        val y = dayStart(now) - Db.DAY  // yesterday, fixed hours — independent of the time the test runs
+        Ingest.handle(ctx, "בוצעה עסקה\nב-סטופ בסך ₪55 בכרטיס ויזה 1234, פרטים", y + 10 * 3600000L, Src.NOTIF_CAL, "cal", "")
+        Ingest.handle(ctx, "בוצעה עסקה\nב-טסט פיקס בסך ₪80 בכרטיס ויזה 1234, פרטים", y + 11 * 3600000L, Src.NOTIF_CAL, "cal", "")
+        val day = y + 12 * 3600000L
         val r = Importers.commitWithReport(ctx, listOf(
             ImportRow(day, 55.0, Types.EXPENSE, "סטופ", "", card = "1234"),
             ImportRow(day, 30.0, Types.EXPENSE, "FACEBK *X", "", card = "1234")
