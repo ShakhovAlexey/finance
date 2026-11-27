@@ -19,6 +19,8 @@ object Dict {
     private var words: Map<String, String> = emptyMap()
     private var itemCat: Map<String, List<String>> = emptyMap()
     private var merchCat: Map<String, List<String>> = emptyMap()
+    private var names: List<Pair<String, String>> = emptyList()
+    private var cities: List<Pair<String, String>> = emptyList()
     private var loaded = false
 
     @Synchronized fun load(ctx: Context) {
@@ -30,6 +32,8 @@ object Dict {
                 m.keys().asSequence().associateWith { k -> m.getJSONArray(k).let { a -> (0 until a.length()).map { a.getString(it).lowercase() } } }
             }
             itemCat = lists("itemCategory"); merchCat = lists("merchantCategory")
+            fun pairs(n: String) = o.optJSONObject(n)?.let { m -> m.keys().asSequence().map { Parsers.merchantKey(it) to m.getString(it) }.filter { it.first.isNotEmpty() }.sortedByDescending { it.first.length }.toList() } ?: emptyList()
+            names = pairs("merchantNames"); cities = pairs("cities")
         }
         loaded = true
     }
@@ -60,12 +64,29 @@ object Dict {
         }
     }
 
+    private fun hasWord(text: String, key: String): Boolean {
+        val t = " $text "
+        if (key.contains(' ')) return t.contains(" $key ") || t.contains(" $key")
+        return text.split(' ').any { w -> w == key || (key.length >= 4 && w.startsWith(key)) || (w.length > key.length && w.startsWith(key) && w[key.length] == '-') }
+    }
+
+    /** Known chain → Russian name, plus the town if the statement names one: «Эйс (товары для дома), Назарет». */
+    fun merchantName(ctx: Context, merchant: String): String? {
+        load(ctx)
+        val k = Parsers.merchantKey(merchant)
+        if (k.isEmpty()) return null
+        val n = names.firstOrNull { hasWord(k, it.first) } ?: return null
+        val city = cities.firstOrNull { hasWord(k, it.first) && !n.first.contains(it.first) }?.second
+        return if (city != null && !n.second.contains(city)) "${n.second}, $city" else n.second
+    }
+
     /** Fills category + Russian name for a fresh transaction. */
     fun enrich(ctx: Context, t: Tx, kind: Parsers.Kind?) {
         val db = Db.get(ctx)
         val key = Parsers.merchantKey(t.merchant)
         val rule = if (key.isNotEmpty()) db.rule(key) else null
         if (t.merchantRu.isEmpty()) t.merchantRu = rule?.first?.takeIf { it.isNotEmpty() }
+            ?: merchantName(ctx, t.merchant)
             ?: if (Parsers.hasHebrew(t.merchant)) translate(ctx, t.merchant) else ""
         t.category = when {
             rule != null && rule.second.isNotEmpty() -> rule.second
@@ -98,7 +119,8 @@ object Ingest {
                 // Google Wallet only shows payments; other apps must clearly talk about a payment
                 val p = if (src == Src.NOTIF_WALLET || (src != Src.SMS && Parsers.looksLikePayment(all))) Parsers.parseWallet(title, text) else null
                 if (p != null) return store(ctx, p, ts, src, hash, "[$sender] $title\n$text")
-                if (looksFinancial(text)) db.addUnparsed(Src.label(src), sender, (if (title.isNotEmpty()) "$title\n" else "") + text, ts)
+                val shown = (if (title.isNotEmpty()) "$title\n" else "") + text
+                if (looksFinancial(text) && Prefs.signature(shown) !in Prefs.ignored(ctx)) db.addUnparsed(Src.label(src), sender, (if (title.isNotEmpty()) "$title\n" else "") + text, ts)
                 return null
             }
         }
@@ -174,7 +196,7 @@ class SmsReceiver : BroadcastReceiver() {
                     val ts = parts.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
                     Ingest.handle(ctx, body, ts, Src.SMS, sender)?.let { Ingest.notifyRecorded(ctx, it) }
                 }
-                Backup.schedule(ctx)
+                Backup.write(ctx); Backup.schedule(ctx)
             } finally { pending.finish() }
         }
     }
@@ -216,7 +238,9 @@ class NotifService : NotificationListenerService() {
             }
         }
         thread {
-            Ingest.handle(this, text, sbn.notification.`when`.takeIf { it > 0 } ?: sbn.postTime, src, pkg, title)?.let { Ingest.notifyRecorded(this, it) }
+            Ingest.handle(this, text, sbn.notification.`when`.takeIf { it > 0 } ?: sbn.postTime, src, pkg, title)?.let {
+                Ingest.notifyRecorded(this, it); Backup.write(this)
+            }
             Backup.schedule(this)
         }
     }

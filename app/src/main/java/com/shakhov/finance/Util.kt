@@ -33,6 +33,11 @@ fun dayStart(ts: Long): Long = Calendar.getInstance().apply {
 object Prefs {
     fun get(ctx: Context): SharedPreferences = ctx.getSharedPreferences("prefs", Context.MODE_PRIVATE)
 
+    /** Shape of a message without numbers — to hide similar unrecognised messages. */
+    fun signature(text: String) = Parsers.clean(text).replace(Regex("[\\d.,:/₪-]+"), "#").replace(Regex("\\s+"), " ").take(40)
+    fun ignored(ctx: Context): Set<String> = get(ctx).getStringSet("ignoredSigs", emptySet())!!
+    fun ignore(ctx: Context, text: String) { get(ctx).edit().putStringSet("ignoredSigs", ignored(ctx) + signature(text)).apply() }
+
     /** Apps (not yet enabled) that posted notifications with shekel amounts. */
     fun rememberPkg(ctx: Context, pkg: String, sample: String) {
         val p = get(ctx)
@@ -73,6 +78,18 @@ object Migrate {
         }
         if (!p.getBoolean("repair_v7", false)) { Repair.run(ctx); p.edit().putBoolean("repair_v7", true).apply() }
         Transfers.link(ctx)
+        if (!p.getBoolean("names_v11", false)) {
+            // replace machine transliterations («Аиис Нцрт») with known chain names
+            val db = Db.get(ctx)
+            db.query("merchant!=''").forEach { t ->
+                val rule = db.rule(Parsers.merchantKey(t.merchant))?.first?.takeIf { it.isNotEmpty() }
+                if (rule != null) return@forEach
+                val auto = t.merchantRu.isEmpty() || t.merchantRu == Dict.translate(ctx, t.merchant) || t.merchantRu == Parsers.translit(t.merchant)
+                if (!auto) return@forEach
+                Dict.merchantName(ctx, t.merchant)?.let { t.merchantRu = it; db.update(t) }
+            }
+            p.edit().putBoolean("names_v11", true).apply(); db.changed()
+        }
         if (!p.getBoolean("max_v8", false)) {
             val db = Db.get(ctx)
             db.query("type IN (?,?)", arrayOf(Types.TRANSFER, Types.EXPENSE)).filter { Max.isMax(it.merchant) || (it.card.isEmpty() && Max.isMax(it.raw)) }
@@ -135,7 +152,14 @@ object Seed {
 object Backup {
     fun uri(ctx: Context): Uri? = Prefs.get(ctx).getString("backupUri", null)?.let { Uri.parse(it) }
 
-    fun write(ctx: Context): Boolean {
+    private val lock = Any()
+
+    /** Copy right away in a background thread (app closed, SMS recorded). */
+    fun writeNowAsync(ctx: Context) { val c = ctx.applicationContext; Thread { write(c) }.start() }
+
+    fun write(ctx: Context): Boolean = synchronized(lock) { writeLocked(ctx) }
+
+    private fun writeLocked(ctx: Context): Boolean {
         val u = uri(ctx) ?: return false
         return runCatching {
             ctx.contentResolver.openOutputStream(u, "wt")!!.use { it.write(Db.get(ctx).exportJson().toString().toByteArray()) }

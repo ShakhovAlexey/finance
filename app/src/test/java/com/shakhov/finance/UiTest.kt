@@ -19,7 +19,7 @@ class UiTest {
         val ctx = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         val oct = java.util.Calendar.getInstance().apply { add(java.util.Calendar.MONTH, -1); set(java.util.Calendar.DAY_OF_MONTH, 8) }.timeInMillis
         Db.get(ctx).insert(Tx(ts = oct, amount = 66.0, category = "Кафе и рестораны", merchant = "ארומה", merchantRu = "Арома, Нацрат-Илит (кафе)", src = Src.MANUAL))
-        rule.onNodeWithText("Расходы").assertExists()
+        rule.onNodeWithText("Расход").assertExists()
         // go to October (old table data)
         rule.onNodeWithContentDescription("Предыдущий месяц").performClick()
         rule.waitForIdle()

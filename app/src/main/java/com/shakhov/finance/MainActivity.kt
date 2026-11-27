@@ -55,6 +55,11 @@ class MainActivity : ComponentActivity() {
         setContent { App() }
         lifecycleScope.launch { Updater.check(this@MainActivity) }
     }
+
+    override fun onStop() {
+        super.onStop()
+        Backup.writeNowAsync(this)
+    }
 }
 
 val Green = Color(0xFF2E7D32)
@@ -81,6 +86,7 @@ sealed class Screen {
     data object Unparsed : Screen()
     data class Preview(val rows: List<ImportRow>, val title: String) : Screen()
     data class Receipt(val uri: Uri) : Screen()
+    data class Recon(val r: Importers.Recon) : Screen()
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -113,7 +119,8 @@ fun App() {
                     Screen.Add -> AddScreen(go = { screen = it }, onManual = { editing = it })
                     Screen.Setup -> SetupScreen()
                     Screen.Unparsed -> UnparsedScreen(onBack = { screen = Screen.Feed }, onManual = { editing = it })
-                    is Screen.Preview -> PreviewScreen(s.rows, s.title, done = { screen = Screen.Feed })
+                    is Screen.Preview -> PreviewScreen(s.rows, s.title, done = { screen = Screen.Feed }, report = { screen = Screen.Recon(it) })
+                    is Screen.Recon -> ReconScreen(s.r, onEdit = { editing = it }, done = { screen = Screen.Feed })
                     is Screen.Receipt -> ReceiptScreen(s.uri, done = { screen = Screen.Feed })
                 }
             }
@@ -148,26 +155,7 @@ fun FeedScreen(onEdit: (Tx) -> Unit, onUnparsed: () -> Unit) {
     val unparsed = remember(v) { db.unparsed().size }
     LazyColumn(Modifier.fillMaxSize()) {
         item { MonthBar(month) { month = it } }
-        item {
-            Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp)) {
-                Column(Modifier.padding(14.dp)) {
-                    Row { Text("Расходы", Modifier.weight(1f)); Text(fmtMoney(expenseTotal(list)), color = Red, fontWeight = FontWeight.Bold) }
-                    Row { Text("Доходы", Modifier.weight(1f)); Text(fmtMoney(incomeTotal(list)), color = Green, fontWeight = FontWeight.Bold) }
-                    val inc = incomeTotal(list); val rest = inc - expenseTotal(list)
-                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
-                    Row {
-                        Text("Остаток с дохода", Modifier.weight(1f), fontWeight = FontWeight.SemiBold)
-                        Text((if (rest < 0) "−" else "") + fmtMoney(kotlin.math.abs(rest)), color = if (rest < 0) Red else Green, fontWeight = FontWeight.Bold)
-                    }
-                    if (inc > 0) Text("потрачено ${Math.round(expenseTotal(list) * 100 / inc)}% дохода", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
-                    if (balances.isNotEmpty()) Spacer(Modifier.height(4.dp))
-                    balances.forEach { (acc, amt, ts) ->
-                        val jointMark = if (acc == Transfers.joint(ctx)) " (общий)" else ""
-                        Row { Text("Счёт $acc$jointMark · ${fmtDate(ts, "d.MM")}", Modifier.weight(1f), fontSize = 13.sp); Text(fmtMoney(amt), fontSize = 13.sp) }
-                    }
-                }
-            }
-        }
+        item { SummaryCard(month, list, balances) }
         item { UpdateBanner() }
         if (unparsed > 0) item {
             Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp).clickable { onUnparsed() },
@@ -401,6 +389,11 @@ fun UnparsedScreen(onBack: () -> Unit, onManual: (Tx) -> Unit) {
                         }) { Text("Копировать") }
                         TextButton(onClick = { db.deleteUnparsed(u.id) }) { Text("Удалить") }
                     }
+                    TextButton(onClick = {
+                        Prefs.ignore(ctx, u.text)
+                        val sig = Prefs.signature(u.text)
+                        db.unparsed().filter { Prefs.signature(it.text) == sig }.forEach { db.deleteUnparsed(it.id) }
+                    }) { Text("Это не операция — больше не показывать такие") }
                 }
             }
         }
@@ -587,5 +580,50 @@ fun UpdateBanner() {
         }
         is Updater.State.Error -> Text(x.msg, Modifier.padding(16.dp, 4.dp), color = Red)
         Updater.State.Idle -> {}
+    }
+}
+
+/** Main number first: what is left of this month's income; then income/expense and the spent-share bar. */
+@Composable
+fun SummaryCard(month: Long, list: List<Tx>, balances: List<Triple<String, Double, Long>>) {
+    val ctx = LocalContext.current
+    val inc = incomeTotal(list); val exp = expenseTotal(list); val rest = inc - exp
+    val now = System.currentTimeMillis()
+    val current = month == monthStart(now)
+    val daysLeft = if (current) ((addMonths(month, 1) - dayStart(now)) / Db.DAY).toInt().coerceAtLeast(1) else 0
+    var showAcc by remember { mutableStateOf(false) }
+    Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp)) {
+        Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(if (inc > 0) "Остаток с дохода" else "Доходов в этом месяце пока нет", fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
+            Text((if (rest < 0) "−" else "") + fmtMoney(kotlin.math.abs(rest)), fontSize = 34.sp, fontWeight = FontWeight.Bold,
+                color = if (rest < 0) Red else if (inc > 0) Green else MaterialTheme.colorScheme.onSurface)
+            if (current && rest > 0) Text("≈ ${fmtMoney(Math.floor(rest / daysLeft))} в день · осталось дней: $daysLeft", fontSize = 13.sp)
+            if (inc > 0) {
+                val share = (exp / inc).toFloat()
+                val col = when { share > 1f -> Red; share > 0.8f -> Color(0xFFFB8C00); else -> Green }
+                Spacer(Modifier.height(10.dp))
+                LinearProgressIndicator(progress = { share.coerceIn(0f, 1f) }, color = col, trackColor = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)))
+                Text("потрачено ${Math.round(share * 100)}% дохода", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Доход", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                    Text(fmtMoney(inc), color = Green, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                }
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Расход", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                    Text(fmtMoney(exp), color = Red, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                }
+            }
+            if (balances.isNotEmpty()) {
+                TextButton(onClick = { showAcc = !showAcc }) { Text(if (showAcc) "Скрыть счета" else "Остаток на счетах") }
+                if (showAcc) balances.forEach { (acc, amt, ts) ->
+                    val jointMark = if (acc == Transfers.joint(ctx)) " (общий)" else ""
+                    Row(Modifier.fillMaxWidth()) { Text("Счёт $acc$jointMark · ${fmtDate(ts, "d.MM")}", Modifier.weight(1f), fontSize = 13.sp); Text(fmtMoney(amt), fontSize = 13.sp) }
+                }
+            }
+        }
     }
 }

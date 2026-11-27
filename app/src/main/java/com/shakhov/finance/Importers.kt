@@ -280,7 +280,36 @@ object Importers {
         }
     }
 
-    fun commit(ctx: Context, rows: List<ImportRow>): Int {
+    data class Recon(
+        val card: String,
+        val rows: Int,
+        val statementSum: Double,
+        val added: List<Tx>,
+        val matched: Int,
+        val onlyApp: List<Tx>,
+        val chargeDay: Int?
+    )
+
+    /** Import + what differs between the statement and what the app already knew. */
+    fun commitWithReport(ctx: Context, rows: List<ImportRow>): Recon {
+        val newIds = mutableListOf<Long>()
+        val n = commit(ctx, rows, newIds)
+        val db = Db.get(ctx)
+        val inc = rows.filter { it.include }
+        val reg = inc.filter { it.installments == 0 }
+        val card = inc.firstOrNull { it.card.isNotEmpty() }?.card ?: ""
+        val from = if (reg.isEmpty()) System.currentTimeMillis() else dayStart(reg.minOf { it.ts })
+        val added = newIds.mapNotNull { db.byId(it) }.filter { it.src == Src.STATEMENT }
+        val onlyApp = db.query("ts>=? AND type=? AND (src & ?)=0 AND (src & ?)=0", arrayOf(from.toString(), Types.EXPENSE, Src.STATEMENT.toString(), Src.PLAN.toString()))
+            .filter { t ->
+                t.category != "Наличные" && t.category != Transfers.ALIMONY && t.grp.isEmpty() &&
+                    (if (card.isNotEmpty()) t.card == card || (t.card.isEmpty() && t.account.isEmpty()) else t.card.isEmpty())
+            }.sortedBy { it.ts }
+        val sum = inc.filter { it.type == Types.EXPENSE }.sumOf { it.amount } - inc.filter { it.type == Types.INCOME }.sumOf { it.amount }
+        return Recon(card, inc.size, Math.round(sum * 100) / 100.0, added, inc.size - added.size, onlyApp, if (card.isNotEmpty()) lastChargeDay else null)
+    }
+
+    fun commit(ctx: Context, rows: List<ImportRow>, newIds: MutableList<Long>? = null): Int {
         var n = 0
         val db = Db.get(ctx)
         // Re-importing a card statement: forget what earlier statements of this card said for these dates
@@ -301,7 +330,8 @@ object Importers {
             if (t.category == "Другое" && r.type == Types.EXPENSE) categoryFor(r)?.let { t.category = it }
             Max.apply(t)
             if (r.type == Types.INCOME && r.merchant.contains("משכורת")) t.category = "Зарплата"
-            if (Db.get(ctx).addOrMerge(t).second) n++
+            val (saved, isNew) = Db.get(ctx).addOrMerge(t)
+            if (isNew) { n++; newIds?.add(saved.id) }
         }
         Transfers.link(ctx)
         Backup.schedule(ctx)

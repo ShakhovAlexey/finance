@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -150,7 +151,7 @@ fun EditDialog(orig: Tx, onClose: () -> Unit) {
 // ============================ Statement preview ============================
 
 @Composable
-fun PreviewScreen(rows0: List<ImportRow>, title: String, done: () -> Unit) {
+fun PreviewScreen(rows0: List<ImportRow>, title: String, done: () -> Unit, report: (Importers.Recon) -> Unit) {
     val ctx = LocalContext.current
     val rows = remember { mutableStateListOf(*rows0.toTypedArray()) }
     var ver by remember { mutableIntStateOf(0) }
@@ -185,9 +186,7 @@ fun PreviewScreen(rows0: List<ImportRow>, title: String, done: () -> Unit) {
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = done, Modifier.weight(1f)) { Text("Отмена") }
             Button(onClick = {
-                val n = Importers.commit(ctx, rows.toList())
-                Toast.makeText(ctx, "Добавлено новых: $n, остальные склеены с уже записанными", Toast.LENGTH_LONG).show()
-                done()
+                report(Importers.commitWithReport(ctx, rows.toList()))
             }, Modifier.weight(1f)) { Text("Импорт (${rows.count { it.include }})") }
         }
     }
@@ -338,4 +337,55 @@ suspend fun saveReceipt(ctx: android.content.Context, rItems: List<RItem>, paid:
         if (t.id > 0) db.update(t) else db.insert(t)
     }
     db.changed(); Backup.schedule(ctx)
+}
+
+// ============================ Reconciliation ============================
+
+@Composable
+fun ReconScreen(r0: Importers.Recon, onEdit: (Tx) -> Unit, done: () -> Unit) {
+    val ctx = LocalContext.current
+    val v = rememberDbVersion()
+    val db = remember { Db.get(ctx) }
+    // drop rows the user deleted meanwhile
+    val onlyApp = remember(v) { r0.onlyApp.mapNotNull { db.byId(it.id) }.filter { it.src and Src.STATEMENT == 0 } }
+    val added = remember(v) { r0.added.mapNotNull { db.byId(it.id) } }
+    LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+        item {
+            Text("Сверка с выпиской", fontWeight = FontWeight.Bold, fontSize = 20.sp, modifier = Modifier.padding(top = 12.dp))
+            Card(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row { Text("Строк в выписке", Modifier.weight(1f)); Text("${r0.rows}") }
+                    Row { Text(if (r0.card.isNotEmpty()) "К списанию по карте ${r0.card}" else "Итого по выписке", Modifier.weight(1f)); Text(fmtMoney(r0.statementSum), fontWeight = FontWeight.Bold) }
+                    r0.chargeDay?.let { Text("День расчёта Cal: $it-е — рассрочки пересчитаны под него", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline) }
+                    HorizontalDivider()
+                    Row { Text("✓ Уже были в приложении", Modifier.weight(1f)); Text("${r0.matched}", color = Green) }
+                    Row { Text("+ Добавлены из выписки", Modifier.weight(1f)); Text("${added.size}") }
+                    Row { Text("? Есть в приложении, нет в выписке", Modifier.weight(1f)); Text("${onlyApp.size}", color = if (onlyApp.isEmpty()) Green else Red) }
+                }
+            }
+            if (onlyApp.isEmpty()) Text("Всё сходится 👍", Modifier.padding(vertical = 8.dp), color = Green, fontWeight = FontWeight.SemiBold)
+        }
+        if (onlyApp.isNotEmpty()) {
+            item {
+                Text("Нет в выписке (${fmtMoney(onlyApp.sumOf { it.amount })})", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 8.dp))
+                Text("Обычно это свежие покупки — банк ещё не провёл. Если покупку отменили — удали её.", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+            }
+            items(onlyApp, key = { "o" + it.id }) { t ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) { TxRow(t) { onEdit(t) } }
+                    IconButton(onClick = { db.delete(t.id); db.changed(); Backup.schedule(ctx) }) { Icon(Icons.Default.Delete, "Удалить", tint = Red) }
+                }
+            }
+        }
+        if (added.isNotEmpty()) {
+            item {
+                Text("Добавлены из выписки (${fmtMoney(added.sumOf { it.amount })})", fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 12.dp))
+                Text("О них не было СМС или уведомления.", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+            }
+            items(added, key = { "a" + it.id }) { t -> TxRow(t) { onEdit(t) } }
+        }
+        item {
+            Button(onClick = done, Modifier.fillMaxWidth().padding(vertical = 16.dp)) { Text("Готово") }
+        }
+    }
 }

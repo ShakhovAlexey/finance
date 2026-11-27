@@ -246,6 +246,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
         readableDatabase.rawQuery("SELECT hash FROM seen", null).use { c -> while (c.moveToNext()) seen.put(c.getString(0)) }
         root.put("seen", seen)
         root.put("plans", JSONArray().also { a -> Plans.all(this).forEach { a.put(Plans.toJson(it)) } })
+        root.put("unparsed", JSONArray().also { a -> unparsed().forEach { a.put(JSONArray().put(it.ts).put(it.source).put(it.sender).put(it.text)) } })
         return root
     }
 
@@ -253,7 +254,7 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
         val db = writableDatabase
         db.beginTransaction()
         try {
-            listOf("tx", "rules", "balances", "words", "seen", "plans").forEach { db.delete(it, null, null) }
+            listOf("tx", "rules", "balances", "words", "seen", "plans", "unparsed").forEach { db.delete(it, null, null) }
             val txs = root.getJSONArray("tx")
             for (i in 0 until txs.length()) {
                 val o = txs.getJSONObject(i)
@@ -272,6 +273,12 @@ class Db private constructor(ctx: Context) : SQLiteOpenHelper(ctx, "finance.db",
             } }
             root.optJSONArray("words")?.let { a -> for (i in 0 until a.length()) a.getJSONArray(i).let { setWord(it.getString(0), it.getString(1)) } }
             root.optJSONArray("seen")?.let { a -> for (i in 0 until a.length()) markSeen(a.getString(i)) }
+            root.optJSONArray("unparsed")?.let { a -> for (i in 0 until a.length()) a.getJSONArray(i).let {
+                db.insertWithOnConflict("unparsed", null, ContentValues().apply {
+                    put("ts", it.getLong(0)); put("source", it.getString(1)); put("sender", it.getString(2)); put("text", it.getString(3))
+                    put("hash", (it.getString(1) + it.getString(3)).hashCode().toString())
+                }, SQLiteDatabase.CONFLICT_IGNORE)
+            } }
             root.optJSONArray("plans")?.let { a -> for (i in 0 until a.length()) Plans.insertRaw(this, Plans.fromJson(a.getJSONObject(i))) }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
