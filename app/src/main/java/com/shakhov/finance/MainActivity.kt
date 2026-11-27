@@ -53,6 +53,7 @@ import androidx.lifecycle.lifecycleScope
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLog.install(this)
         Cats.load(this)
         Seed.run(this)
         Migrate.run(this)
@@ -560,6 +561,21 @@ fun SetupScreen() {
             })
         }
         HorizontalDivider()
+        CrashLog.last(ctx)?.let { err ->
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                Column(Modifier.padding(12.dp)) {
+                    Text("Последняя ошибка (уже в копии на Диске)", fontWeight = FontWeight.SemiBold)
+                    Text(err.lines().take(3).joinToString("\n"), fontSize = 11.sp)
+                    Row {
+                        TextButton(onClick = {
+                            ctx.getSystemService(android.content.ClipboardManager::class.java).setPrimaryClip(android.content.ClipData.newPlainText("error", err))
+                            Toast.makeText(ctx, "Скопировано", Toast.LENGTH_SHORT).show()
+                        }) { Text("Копировать") }
+                        TextButton(onClick = { prefs.edit().remove("lastCrash").apply(); tick++ }) { Text("Убрать") }
+                    }
+                }
+            }
+        }
         var catsOpen by remember { mutableStateOf(false) }
         OutlinedButton(onClick = { catsOpen = true }, Modifier.fillMaxWidth()) { Text("Категории: добавить, переименовать, удалить") }
         if (catsOpen) CategoriesDialog { catsOpen = false }

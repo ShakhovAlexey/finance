@@ -117,21 +117,18 @@ object Budget {
     /** Same shop charged in at least 2 of the 3 previous months with a similar amount (±15%). */
     fun recurring(ctx: Context, month: Long): List<Recurring> {
         val db = Db.get(ctx)
-        val prev = (1..3).map { addMonths(month, -it) }
-        val byMonth = prev.map { m -> db.query("type=? AND ts>=? AND ts<?", arrayOf(Types.EXPENSE, m.toString(), addMonths(m, 1).toString())) }
-        val cur = db.query("type=? AND ts>=? AND ts<?", arrayOf(Types.EXPENSE, month.toString(), addMonths(month, 1).toString()))
-        val keys = byMonth.flatten().mapNotNull { keyOf(it) }.toSet()
+        val all = db.query("type=? AND ts>=? AND ts<?", arrayOf(Types.EXPENSE, addMonths(month, -3).toString(), addMonths(month, 1).toString()))
+        val keyed = all.mapNotNull { t -> keyOf(t)?.let { it to t } }          // key computed once per operation
+        val byKey = keyed.groupBy({ it.first }, { it.second })
+        val prevStarts = (1..3).map { addMonths(month, -it) }
         val out = mutableListOf<Recurring>()
-        for (k in keys) {
-            val hits = byMonth.map { l -> l.filter { keyOf(it) == k } }
-            val monthsWith = hits.count { it.isNotEmpty() }
-            if (monthsWith < 2) continue
-            // one charge per month (vending machines / supermarkets several times a month are not "постоянные")
+        for ((k, txs) in byKey) {
+            val hits = prevStarts.map { m -> val e = addMonths(m, 1); txs.filter { it.ts >= m && it.ts < e } }
+            if (hits.count { it.isNotEmpty() } < 2) continue
             if (hits.any { it.size > 1 }) continue
             val last = hits.first { it.isNotEmpty() }.first()
-            val amounts = hits.filter { it.isNotEmpty() }.map { it.first().amount }
-            if (amounts.any { abs(it - last.amount) > last.amount * 0.15 }) continue
-            val paid = cur.firstOrNull { keyOf(it) == k }
+            if (hits.filter { it.isNotEmpty() }.any { abs(it.first().amount - last.amount) > last.amount * 0.15 }) continue
+            val paid = txs.firstOrNull { it.ts >= month }
             val day = Calendar.getInstance().apply { timeInMillis = last.ts }.get(Calendar.DAY_OF_MONTH)
             out += Recurring(k, last.merchantRu.ifEmpty { last.merchant }.ifEmpty { last.category }, last.category, paid?.amount ?: last.amount, day, paid?.ts)
         }
@@ -141,13 +138,13 @@ object Budget {
     // ---------- forecast ----------
     data class Forecast(val income: Double, val expense: Double, val reserved: Double, val rest: Double, val expectedRecurring: Double, val expectedSalary: Double)
 
-    fun forecast(ctx: Context, month: Long, now: Long = System.currentTimeMillis()): Forecast {
+    fun forecast(ctx: Context, month: Long, now: Long = System.currentTimeMillis(), recurringList: List<Recurring>? = null): Forecast {
         val db = Db.get(ctx)
         val list = db.between(month, addMonths(month, 1))
         val exp = list.filter { it.type == Types.EXPENSE && it.currency == "ILS" }
         val spent = exp.sumOf { it.amount }
         var income = list.filter { it.type == Types.INCOME && it.currency == "ILS" }.sumOf { it.amount }
-        val rec = recurring(ctx, month)
+        val rec = recurringList ?: recurring(ctx, month)
         val recKeys = rec.map { it.key }.toSet()
         val expectedRec = rec.filter { it.paidTs == null }.sumOf { it.amount }
         // salary not yet in: expect last month's
@@ -160,10 +157,32 @@ object Budget {
         val elapsed = ((minOf(now, end) - month) / Db.DAY).toInt().coerceAtLeast(1)
         val left = ((end - maxOf(now, month)) / Db.DAY).toInt().coerceAtLeast(0)
         // day-to-day spending pace: without recurring, installments and alimony
-        val variable = exp.filter { keyOf(it)?.let { k -> k in recKeys } != true && !it.grp.startsWith("plan:") && it.category != Transfers.ALIMONY }.sumOf { it.amount }
+        val variable = exp.filter { !it.grp.startsWith("plan:") && it.category != Transfers.ALIMONY && keyOf(it)?.let { k -> k in recKeys } != true }.sumOf { it.amount }
         val future = (1..left).let { if (left == 0) 0.0 else variable / elapsed * left }
         val totalExp = spent + expectedRec + future
         val reserved = reserved(ctx, month, income)
         return Forecast(income, totalExp, reserved, income - totalExp - reserved, expectedRec, expSalary)
+    }
+}
+
+/** Everything the «План» tab shows, computed off the main thread. */
+data class BudgetData(
+    val income: Double,
+    val forecast: Budget.Forecast,
+    val recurring: List<Budget.Recurring>,
+    val goals: List<Triple<Budget.Goal, Double, Double>>,     // goal, saved this month, balance
+    val limits: List<Triple<String, Double, Double>>          // category, limit, spent
+) {
+    companion object {
+        fun load(ctx: Context): BudgetData {
+            val now = System.currentTimeMillis(); val month = monthStart(now); val end = addMonths(month, 1)
+            val list = Db.get(ctx).between(month, end)
+            val income = list.filter { it.type == Types.INCOME && it.currency == "ILS" }.sumOf { it.amount }
+            val rec = Budget.recurring(ctx, month)
+            val fc = Budget.forecast(ctx, month, now, rec)
+            val goals = Budget.goals(ctx).map { g -> Triple(g, Budget.savedIn(ctx, g.name, month, end), Budget.balance(ctx, g.name)) }
+            val limits = Budget.limits(ctx).map { (c, l) -> Triple(c, l, list.filter { it.type == Types.EXPENSE && it.category == c && it.currency == "ILS" }.sumOf { it.amount }) }
+            return BudgetData(income, fc, rec, goals, limits)
+        }
     }
 }

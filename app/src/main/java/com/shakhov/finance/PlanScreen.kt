@@ -48,13 +48,30 @@ fun BudgetScreen() {
     val v = rememberDbVersion()
     val now = System.currentTimeMillis()
     val month = monthStart(now)
-    val db = remember { Db.get(ctx) }
-    val list = remember(v) { db.between(month, addMonths(month, 1)) }
-    val income = incomeTotal(list)
-    val goals = remember(v) { Budget.goals(ctx) }
-    val limits = remember(v) { Budget.limits(ctx) }
-    val rec = remember(v) { Budget.recurring(ctx, month) }
-    val fc = remember(v) { Budget.forecast(ctx, month) }
+    // heavy part runs in the background; the screen never freezes
+    val state by produceState<Result<BudgetData>?>(null, v) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { runCatching { BudgetData.load(ctx) } }
+    }
+    val data = state?.getOrNull()
+    if (state == null) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+        return
+    }
+    if (data == null) {
+        val e = state!!.exceptionOrNull()
+        CrashLog.save(ctx, e!!, "План")
+        Column(Modifier.padding(16.dp)) {
+            Text("Не получилось посчитать план 😕", fontWeight = FontWeight.Bold)
+            Text("Ошибка сохранена в копию на Диске — напиши мне «посмотри ошибку».", fontSize = 13.sp)
+            Text(e.toString(), fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+        }
+        return
+    }
+    val income = data.income
+    val goals = data.goals.map { it.first }
+    val limits = data.limits.associate { it.first to it.second }
+    val rec = data.recurring
+    val fc = data.forecast
     var goalEdit by remember { mutableStateOf<Budget.Goal?>(null) }
     var goalIsNew by remember { mutableStateOf(false) }
     var depositFor by remember { mutableStateOf<Budget.Goal?>(null) }
@@ -91,8 +108,9 @@ fun BudgetScreen() {
         }
         items(goals, key = { "g" + it.name }) { g ->
             val plan = Budget.planned(g, income)
-            val saved = remember(v) { Budget.savedIn(ctx, g.name, month, addMonths(month, 1)) }
-            val bal = remember(v) { Budget.balance(ctx, g.name) }
+            val gd = data.goals.first { it.first.name == g.name }
+            val saved = gd.second
+            val bal = gd.third
             Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp).clickable { goalIsNew = false; goalEdit = g }) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -123,7 +141,7 @@ fun BudgetScreen() {
                 Modifier.padding(16.dp, 0.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
         }
         items(limits.entries.toList(), key = { "l" + it.key }) { (cat, lim) ->
-            val sp = remember(v) { Budget.spent(ctx, cat, month) }
+            val sp = data.limits.first { it.first == cat }.third
             Column(Modifier.fillMaxWidth().clickable { limitEdit = cat }.padding(16.dp, 8.dp)) {
                 Row {
                     Text("${Cats.icon(cat)}  $cat", Modifier.weight(1f))

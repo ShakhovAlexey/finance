@@ -34,7 +34,7 @@ class UiTest {
         rule.onNodeWithText("Новая операция").assertExists()
         rule.onNodeWithText("Отмена").performClick()
         rule.onNodeWithText("План").performClick()
-        rule.onNodeWithText("Копилки").assertExists()
+        rule.waitUntil(10000) { rule.onAllNodesWithText("Копилки").fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithText("Рассрочки").performClick()
         rule.onNodeWithText("Осталось выплатить").performClick()
         rule.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("Добавить рассрочку вручную"))

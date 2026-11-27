@@ -199,6 +199,7 @@ object Backup {
     }
 
     fun full(ctx: Context): JSONObject = Db.get(ctx).exportJson().put("settings", Prefs.export(ctx))
+        .put("lastCrash", CrashLog.last(ctx) ?: "")
 
     fun writeTo(ctx: Context, u: Uri): Boolean = runCatching {
         ctx.contentResolver.openOutputStream(u, "wt")!!.use { it.write(full(ctx).toString().toByteArray()) }; true
@@ -266,5 +267,29 @@ object Repair {
             }
         }
         db.changed()
+    }
+}
+
+/** Keeps the last error so it reaches the Google Drive copy (Claude can read it there). */
+object CrashLog {
+    fun save(ctx: Context, e: Throwable, where: String) {
+        val text = "${fmtDate(System.currentTimeMillis(), "dd.MM.yyyy HH:mm:ss")} [$where] v${runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull()}\n" +
+            android.util.Log.getStackTraceString(e).take(6000)
+        Prefs.get(ctx).edit().putString("lastCrash", text).commit()
+    }
+    fun last(ctx: Context): String? = Prefs.get(ctx).getString("lastCrash", null)
+
+    fun install(ctx: Context) {
+        val app = ctx.applicationContext
+        val prev = Thread.getDefaultUncaughtExceptionHandler()
+        if (prev is Handler) return
+        Thread.setDefaultUncaughtExceptionHandler(Handler(app, prev))
+    }
+
+    private class Handler(val ctx: Context, val prev: Thread.UncaughtExceptionHandler?) : Thread.UncaughtExceptionHandler {
+        override fun uncaughtException(t: Thread, e: Throwable) {
+            runCatching { save(ctx, e, "сбой: ${t.name}"); Backup.write(ctx) }
+            prev?.uncaughtException(t, e)
+        }
     }
 }
