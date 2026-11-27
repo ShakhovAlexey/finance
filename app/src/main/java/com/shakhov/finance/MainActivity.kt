@@ -16,6 +16,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -50,6 +53,7 @@ import androidx.lifecycle.lifecycleScope
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Cats.load(this)
         Seed.run(this)
         Migrate.run(this)
         setContent { App() }
@@ -102,7 +106,7 @@ fun App() {
                     listOf(
                         Triple(Screen.Feed, "Лента", Icons.AutoMirrored.Filled.List),
                         Triple(Screen.Report, "Отчёт", Icons.Default.PieChart),
-                        Triple(Screen.Plans, "Рассрочки", Icons.Default.CreditCard),
+                        Triple(Screen.Plans, "План", Icons.Default.Savings),
                         Triple(Screen.Add, "Добавить", Icons.Default.AddCircle),
                         Triple(Screen.Setup, "Настройки", Icons.Default.Settings)
                     ).forEach { (s, label, icon) ->
@@ -115,7 +119,7 @@ fun App() {
                 when (val s = screen) {
                     Screen.Feed -> FeedScreen(onEdit = { editing = it }, onUnparsed = { screen = Screen.Unparsed })
                     Screen.Report -> ReportScreen(onEdit = { editing = it })
-                    Screen.Plans -> PlansScreen()
+                    Screen.Plans -> PlanTab()
                     Screen.Add -> AddScreen(go = { screen = it }, onManual = { editing = it })
                     Screen.Setup -> SetupScreen()
                     Screen.Unparsed -> UnparsedScreen(onBack = { screen = Screen.Feed }, onManual = { editing = it })
@@ -126,19 +130,32 @@ fun App() {
             }
         }
         editing?.let { t -> EditDialog(t, onClose = { editing = null }) }
+        UiState.quick?.let { t -> QuickMenu(t, onClose = { UiState.quick = null }, onEdit = { UiState.quick = null; editing = t }) }
     }
 }
 
 // ============================ Feed ============================
 
 @Composable
-fun MonthBar(month: Long, onChange: (Long) -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = { onChange(addMonths(month, -1)) }) { Icon(Icons.Default.ChevronLeft, "Предыдущий месяц") }
-        Text(fmtDate(month, "LLLL yyyy").replaceFirstChar { it.uppercase() }, Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 18.sp,
-            textAlign = androidx.compose.ui.text.style.TextAlign.Center)
-        IconButton(onClick = { onChange(addMonths(month, 1)) }) { Icon(Icons.Default.ChevronRight, "Следующий месяц") }
+fun MonthBar(month: Long, onChange: (Long) -> Unit, trailing: @Composable () -> Unit = {}) {
+    Row(Modifier.fillMaxWidth().padding(16.dp, 10.dp, 4.dp, 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(fmtDate(month, "LLLL yyyy").replaceFirstChar { it.uppercase() }, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            Text("листай вправо/влево — другой месяц", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+        }
+        if (month != monthStart(System.currentTimeMillis())) TextButton(onClick = { onChange(monthStart(System.currentTimeMillis())) }) { Text("Сегодня") }
+        trailing()
     }
+}
+
+/** Horizontal swipe changes the month: right → previous, left → next. */
+fun Modifier.monthSwipe(month: Long, onChange: (Long) -> Unit): Modifier = this.pointerInput(month) {
+    var dx = 0f
+    detectHorizontalDragGestures(
+        onDragStart = { dx = 0f },
+        onDragEnd = { if (dx > 140) onChange(addMonths(month, -1)) else if (dx < -140) onChange(addMonths(month, 1)); dx = 0f },
+        onDragCancel = { dx = 0f }
+    ) { _, d -> dx += d }
 }
 
 fun expenseTotal(l: List<Tx>) = l.filter { it.type == Types.EXPENSE && it.currency == "ILS" }.sumOf { it.amount }
@@ -153,8 +170,38 @@ fun FeedScreen(onEdit: (Tx) -> Unit, onUnparsed: () -> Unit) {
     val list = remember(v, month) { db.between(month, addMonths(month, 1)) }
     val balances = remember(v) { db.balances() }
     val unparsed = remember(v) { db.unparsed().size }
-    LazyColumn(Modifier.fillMaxSize()) {
-        item { MonthBar(month) { month = it } }
+    var query by remember { mutableStateOf<String?>(null) }
+    val found = remember(v, query) {
+        val q = query?.trim()?.lowercase().orEmpty()
+        if (q.length < 2) emptyList() else {
+            val num = parseNum(q)
+            db.query(order = "ts DESC").filter { t ->
+                (num != null && kotlin.math.abs(t.amount - num) < 0.5) ||
+                    listOf(t.merchant, t.merchantRu, t.category, t.note).any { it.lowercase().contains(q) } ||
+                    t.items.any { it.name.contains(q) || it.nameRu.lowercase().contains(q) }
+            }.take(300)
+        }
+    }
+    LazyColumn(Modifier.fillMaxSize().monthSwipe(month) { month = it }) {
+        item {
+            MonthBar(month, { month = it }) {
+                IconButton(onClick = { query = if (query == null) "" else null }) { Icon(if (query == null) Icons.Default.Search else Icons.Default.Close, "Поиск") }
+            }
+        }
+        if (query != null) {
+            item {
+                OutlinedTextField(query!!, { query = it }, placeholder = { Text("Магазин, категория, сумма, товар из чека…") }, singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(12.dp, 4.dp))
+                if (query!!.trim().length >= 2) Text("Найдено: ${found.size} · расход ${fmtMoney(expenseTotal(found))}",
+                    Modifier.padding(16.dp, 4.dp), fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
+            }
+            found.groupBy { monthStart(it.ts) }.forEach { (m, txs) ->
+                item { Text(fmtDate(m, "LLLL yyyy").replaceFirstChar { it.uppercase() }, Modifier.padding(16.dp, 10.dp, 16.dp, 2.dp), fontWeight = FontWeight.SemiBold) }
+                items(txs, key = { "s" + it.id }) { t -> TxRow(t) { onEdit(t) } }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
+            return@LazyColumn
+        }
         item { SummaryCard(month, list, balances) }
         item { UpdateBanner() }
         if (unparsed > 0) item {
@@ -184,11 +231,16 @@ fun catColor(c: String): Color {
     return Color(palette[i % palette.size])
 }
 
+/** Long-press on any operation opens the quick menu (category / split / delete). */
+object UiState { var quick by mutableStateOf<Tx?>(null) }
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun TxRow(t: Tx, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(16.dp, 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(36.dp).clip(CircleShape).background(catColor(t.category)), contentAlignment = Alignment.Center) {
-            Text(t.category.take(1), color = Color.White, fontWeight = FontWeight.Bold)
+    Row(Modifier.fillMaxWidth().combinedClickable(onClick = onClick, onLongClick = { UiState.quick = t }).padding(16.dp, 8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(38.dp).clip(CircleShape).background(catColor(t.category).copy(alpha = 0.22f)), contentAlignment = Alignment.Center) {
+            Text(Cats.icon(t.category), fontSize = 18.sp, color = catColor(t.category), fontWeight = FontWeight.Bold)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -198,6 +250,7 @@ fun TxRow(t: Tx, onClick: () -> Unit) {
                 if (t.merchantRu.isNotEmpty() && t.merchant.isNotEmpty() && t.merchant != t.merchantRu) add(t.merchant)
                 if (t.items.isNotEmpty()) add("чек: ${t.items.size} поз.")
                 if (t.grp.startsWith("plan:") && t.type == Types.EXPENSE && t.note.isNotEmpty()) add(t.note)
+                if (t.grp.startsWith("split:")) add("часть покупки ${fmtMoney(t.grpTotal)}")
             }.joinToString(" · ")
             Text(sub, fontSize = 12.sp, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
@@ -205,11 +258,13 @@ fun TxRow(t: Tx, onClick: () -> Unit) {
             Types.INCOME -> "+" to Green
             Types.TRANSFER -> "↔ " to MaterialTheme.colorScheme.outline
             Types.PLAN -> "" to MaterialTheme.colorScheme.outline
+            Types.SAVE -> "→ " to Color(0xFF1E88E5)
             else -> "−" to MaterialTheme.colorScheme.onSurface
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(sign + fmtMoney(t.amount, t.currency), color = col, fontWeight = FontWeight.SemiBold)
             if (t.type == Types.PLAN) Text("в рассрочку", fontSize = 11.sp, color = col)
+            if (t.type == Types.SAVE) Text("в копилку", fontSize = 11.sp, color = col)
         }
     }
 }
@@ -228,8 +283,16 @@ fun ReportScreen(onEdit: (Tx) -> Unit) {
     val exp = list.filter { it.type == Types.EXPENSE && it.currency == "ILS" }
     val total = exp.sumOf { it.amount }
     val byCat = exp.groupBy { it.category }.mapValues { e -> e.value.sumOf { it.amount } }.entries.sortedByDescending { it.value }
-    LazyColumn(Modifier.fillMaxSize()) {
-        item { MonthBar(month) { month = it } }
+    val history = remember(v, month) {
+        (5 downTo 0).map { i -> val m = addMonths(month, -i); val l = db.between(m, addMonths(m, 1)); Triple(m, incomeTotal(l), expenseTotal(l)) }
+    }
+    val receiptSubs = remember(v, month) {
+        list.filter { it.type == Types.EXPENSE }.flatMap { it.items }.filter { it.price > 0 }
+            .groupBy { it.sub.ifEmpty { "Прочее" } }.mapValues { e -> e.value.sumOf { it.price } }.entries.sortedByDescending { it.value }
+    }
+    LazyColumn(Modifier.fillMaxSize().monthSwipe(month) { month = it }) {
+        item { MonthBar(month, { month = it }) }
+        item { MonthsChart(history, month) }
         item {
             Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp)) {
                 Column(Modifier.padding(14.dp)) {
@@ -266,6 +329,21 @@ fun ReportScreen(onEdit: (Tx) -> Unit) {
         if (foreign.isNotEmpty()) {
             item { Text("В валюте (не входят в сумму, придут в шекелях с выпиской)", Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp), fontSize = 13.sp) }
             items(foreign, key = { "f" + it.id }) { t -> TxRow(t) { onEdit(t) } }
+        }
+        if (receiptSubs.isNotEmpty()) {
+            item {
+                Text("Из чеков: на что именно", Modifier.padding(16.dp, 16.dp, 16.dp, 2.dp), fontWeight = FontWeight.Bold)
+                Text("Только покупки, для которых есть фото чека", Modifier.padding(16.dp, 0.dp), fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+            }
+            val maxSub = receiptSubs.first().value
+            items(receiptSubs, key = { "rs" + it.key }) { (sub, sum) ->
+                Column(Modifier.fillMaxWidth().padding(16.dp, 6.dp)) {
+                    Row { Text(sub, Modifier.weight(1f), fontSize = 14.sp); Text(fmtMoney(sum), fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                    Box(Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                        Box(Modifier.fillMaxWidth((sum / maxSub).toFloat()).fillMaxHeight().background(Color(0xFF7CB342)))
+                    }
+                }
+            }
         }
         item { Spacer(Modifier.height(24.dp)) }
     }
@@ -482,6 +560,10 @@ fun SetupScreen() {
             })
         }
         HorizontalDivider()
+        var catsOpen by remember { mutableStateOf(false) }
+        OutlinedButton(onClick = { catsOpen = true }, Modifier.fillMaxWidth()) { Text("Категории: добавить, переименовать, удалить") }
+        if (catsOpen) CategoriesDialog { catsOpen = false }
+        HorizontalDivider()
         Text("Общий счёт с бывшей женой (алименты)", fontWeight = FontWeight.Bold)
         Text("Что приходит на этот счёт — это твои алименты: считается расходом «Алименты», а не доходом. Перевод с основного счёта не задваивается.", fontSize = 13.sp)
         val accounts = remember(v) { Transfers.accounts(ctx) }
@@ -587,34 +669,43 @@ fun UpdateBanner() {
 @Composable
 fun SummaryCard(month: Long, list: List<Tx>, balances: List<Triple<String, Double, Long>>) {
     val ctx = LocalContext.current
-    val inc = incomeTotal(list); val exp = expenseTotal(list); val rest = inc - exp
+    val inc = incomeTotal(list); val exp = expenseTotal(list)
+    val v = rememberDbVersion()
+    val reserved = remember(v, month, inc) { Budget.reserved(ctx, month, inc) }
+    val rest = inc - exp - reserved
     val now = System.currentTimeMillis()
     val current = month == monthStart(now)
     val daysLeft = if (current) ((addMonths(month, 1) - dayStart(now)) / Db.DAY).toInt().coerceAtLeast(1) else 0
     var showAcc by remember { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp)) {
         Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(if (inc > 0) "Остаток с дохода" else "Доходов в этом месяце пока нет", fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
+            Text(if (inc <= 0) "Доходов в этом месяце пока нет" else if (reserved > 0) "Можно потратить (после копилок)" else "Остаток с дохода",
+                fontSize = 13.sp, color = MaterialTheme.colorScheme.outline)
             Text((if (rest < 0) "−" else "") + fmtMoney(kotlin.math.abs(rest)), fontSize = 34.sp, fontWeight = FontWeight.Bold,
                 color = if (rest < 0) Red else if (inc > 0) Green else MaterialTheme.colorScheme.onSurface)
             if (current && rest > 0) Text("≈ ${fmtMoney(Math.floor(rest / daysLeft))} в день · осталось дней: $daysLeft", fontSize = 13.sp)
             if (inc > 0) {
-                val share = (exp / inc).toFloat()
+                val share = ((exp + reserved) / inc).toFloat()
                 val col = when { share > 1f -> Red; share > 0.8f -> Color(0xFFFB8C00); else -> Green }
                 Spacer(Modifier.height(10.dp))
                 LinearProgressIndicator(progress = { share.coerceIn(0f, 1f) }, color = col, trackColor = MaterialTheme.colorScheme.surfaceVariant,
                     modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)))
-                Text("потрачено ${Math.round(share * 100)}% дохода", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                Text(if (reserved > 0) "потрачено и отложено ${Math.round(share * 100)}% дохода" else "потрачено ${Math.round(share * 100)}% дохода",
+                    fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
             }
             Spacer(Modifier.height(10.dp))
             Row(Modifier.fillMaxWidth()) {
                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Доход", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
-                    Text(fmtMoney(inc), color = Green, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                    Text(fmtMoney(inc), color = Green, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, softWrap = false)
                 }
                 Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Расход", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
-                    Text(fmtMoney(exp), color = Red, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                    Text(fmtMoney(exp), color = Red, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, softWrap = false)
+                }
+                if (reserved > 0) Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Копилки", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                    Text(fmtMoney(reserved), color = Color(0xFF1E88E5), fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, softWrap = false)
                 }
             }
             if (balances.isNotEmpty()) {
@@ -627,3 +718,38 @@ fun SummaryCard(month: Long, list: List<Tx>, balances: List<Triple<String, Doubl
         }
     }
 }
+
+/** Six months: income (green) and expense (red) bars, remainder under each month. */
+@Composable
+fun MonthsChart(data: List<Triple<Long, Double, Double>>, selected: Long) {
+    val max = data.maxOf { maxOf(it.second, it.third) }.coerceAtLeast(1.0)
+    val onSurface = MaterialTheme.colorScheme.outline
+    Card(Modifier.fillMaxWidth().padding(12.dp, 4.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("Доход и расход за полгода", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+            Row(Modifier.fillMaxWidth().height(130.dp).padding(top = 8.dp), verticalAlignment = Alignment.Bottom) {
+                data.forEach { (m, inc, exp) ->
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Row(Modifier.height(100.dp), verticalAlignment = Alignment.Bottom) {
+                            Box(Modifier.width(9.dp).fillMaxHeight((inc / max).toFloat().coerceAtLeast(0.01f)).clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)).background(Green))
+                            Spacer(Modifier.width(2.dp))
+                            Box(Modifier.width(9.dp).fillMaxHeight((exp / max).toFloat().coerceAtLeast(0.01f)).clip(RoundedCornerShape(topStart = 3.dp, topEnd = 3.dp)).background(Red))
+                        }
+                        Text(fmtDate(m, "LLL").take(3), fontSize = 11.sp, fontWeight = if (m == selected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (m == selected) MaterialTheme.colorScheme.onSurface else onSurface)
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth()) {
+                data.forEach { (_, inc, exp) ->
+                    val r = inc - exp
+                    Text(if (inc == 0.0 && exp == 0.0) "" else (if (r < 0) "−" else "+") + shortMoney(kotlin.math.abs(r)), Modifier.weight(1f),
+                        fontSize = 10.sp, color = if (r < 0) Red else Green, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+                }
+            }
+            Text("под месяцем — остаток (доход − расход)", fontSize = 10.sp, color = onSurface)
+        }
+    }
+}
+
+fun shortMoney(v: Double): String = if (v >= 1000) String.format(java.util.Locale("ru"), "%.1fK", v / 1000) else Math.round(v).toString()

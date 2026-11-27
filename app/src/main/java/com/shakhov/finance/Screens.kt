@@ -61,16 +61,19 @@ fun EditDialog(orig: Tx, onClose: () -> Unit) {
     var showDate by remember { mutableStateOf(false) }
     var showRaw by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showSplit by remember { mutableStateOf(false) }
+    if (showSplit) { SplitDialog(orig) { showSplit = false; onClose() }; return }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.92f), shape = MaterialTheme.shapes.large) {
             Column(Modifier.verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if (isNew) "Новая операция" else "Операция", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                if (orig.type == Types.SAVE) Text("Пополнение копилки «${orig.category}». Можно изменить сумму или удалить.", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
                 if (orig.type == Types.PLAN || orig.grp.startsWith("plan:")) Text(
                     if (orig.type == Types.PLAN) "Покупка в рассрочку: в расходы идут ежемесячные платежи. Число платежей и сумму меняй во вкладке «Рассрочки»."
                     else "Платёж по рассрочке. График — во вкладке «Рассрочки».",
                     fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
-                if (orig.type != Types.PLAN) SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                if (orig.type != Types.PLAN && orig.type != Types.SAVE) SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
                     listOf(Types.EXPENSE to "Расход", Types.INCOME to "Доход", Types.TRANSFER to "Перевод").forEachIndexed { i, (t, l) ->
                         SegmentedButton(selected = type == t, onClick = {
                             type = t; if (cat !in Cats.forType(t)) cat = Cats.forType(t).first()
@@ -80,7 +83,9 @@ fun EditDialog(orig: Tx, onClose: () -> Unit) {
                 OutlinedTextField(amount, { amount = it }, label = { Text("Сумма, ${orig.currency}") }, singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal), modifier = Modifier.fillMaxWidth())
                 OutlinedButton(onClick = { showDate = true }) { Text(fmtDate(ts, "d MMMM yyyy, HH:mm")) }
-                CategoryPicker(type, cat) { cat = it }
+                if (orig.type != Types.SAVE) CategoryPicker(type, cat) { cat = it }
+                if (!isNew && orig.type == Types.EXPENSE && !orig.grp.startsWith("plan:"))
+                    TextButton(onClick = { showSplit = true }) { Text("Выделить часть в другую категорию") }
                 OutlinedTextField(merchant, { merchant = it }, label = { Text("Магазин / получатель") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(ru, { ru = it }, label = { Text("По-русски") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                 OutlinedTextField(note, { note = it }, label = { Text("Заметка") }, modifier = Modifier.fillMaxWidth())
@@ -143,7 +148,7 @@ fun EditDialog(orig: Tx, onClose: () -> Unit) {
         onDismissRequest = { confirmDelete = false },
         title = { Text("Удалить операцию?") },
         text = { Text("${fmtMoney(orig.amount, orig.currency)} · ${orig.merchantRu.ifEmpty { orig.merchant }}") },
-        confirmButton = { TextButton(onClick = { db.delete(orig.id); db.changed(); Backup.schedule(ctx); confirmDelete = false; onClose() }) { Text("Удалить", color = Red) } },
+        confirmButton = { TextButton(onClick = { Split.delete(ctx, orig); confirmDelete = false; onClose() }) { Text("Удалить", color = Red) } },
         dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена") } }
     )
 }
@@ -387,5 +392,151 @@ fun ReconScreen(r0: Importers.Recon, onEdit: (Tx) -> Unit, done: () -> Unit) {
         item {
             Button(onClick = done, Modifier.fillMaxWidth().padding(vertical = 16.dp)) { Text("Готово") }
         }
+    }
+}
+
+// ============================ Split / quick menu ============================
+
+object Split {
+    /** Moves [part] of a purchase into another category; both pieces stay linked to the original sum (for statement matching). */
+    fun split(ctx: android.content.Context, t: Tx, part: Double, cat: String): Boolean {
+        if (part <= 0 || part >= t.amount - 0.005 || t.grp.startsWith("plan:")) return false
+        val db = Db.get(ctx)
+        val inGroup = t.grp.isNotEmpty()
+        val grp = if (inGroup) t.grp else "split:" + UUID.randomUUID()
+        val total = if (inGroup) t.grpTotal else t.amount
+        val orig = t.amount
+        t.amount = Math.round((t.amount - part) * 100) / 100.0
+        t.grp = grp; t.grpTotal = total
+        db.update(t)
+        db.insert(t.copy(id = 0, amount = Math.round(part * 100) / 100.0, category = cat, items = emptyList(), hash = "", raw = "",
+            note = "выделено из ${fmtMoney(orig)}"))
+        db.changed(); Backup.schedule(ctx)
+        return true
+    }
+
+    /** Deleting a split piece gives its amount back to the rest of the purchase. */
+    fun delete(ctx: android.content.Context, t: Tx) {
+        val db = Db.get(ctx)
+        if (t.grp.startsWith("split:")) {
+            val rest = db.query("grp=? AND id!=?", arrayOf(t.grp, t.id.toString()))
+            rest.firstOrNull()?.let { r ->
+                r.amount = Math.round((r.amount + t.amount) * 100) / 100.0
+                if (rest.size == 1) { r.grp = ""; r.grpTotal = 0.0 }
+                db.update(r)
+            }
+        }
+        db.delete(t.id); db.changed(); Backup.schedule(ctx)
+    }
+}
+
+@Composable
+fun SplitDialog(t: Tx, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    var part by remember { mutableStateOf("") }
+    var cat by remember { mutableStateOf(if (t.category == "Алкоголь") "Продукты" else "Алкоголь") }
+    AlertDialog(onDismissRequest = onClose, title = { Text("Выделить часть покупки") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("${t.merchantRu.ifEmpty { t.merchant }} · ${fmtMoney(t.amount)} (${t.category})", fontSize = 13.sp)
+            OutlinedTextField(part, { part = it }, label = { Text("Сколько выделить, ₪") }, singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+            val p = parseNum(part) ?: 0.0
+            if (p > 0 && p < t.amount) Text("Останется в «${t.category}»: ${fmtMoney(t.amount - p)}", fontSize = 13.sp, color = MaterialTheme.colorScheme.primary)
+            Text("В категорию:", fontWeight = FontWeight.SemiBold)
+            CategoryPicker(Types.EXPENSE, cat) { cat = it }
+        }
+    }, confirmButton = {
+        TextButton(onClick = {
+            val p = parseNum(part)
+            if (p == null || !Split.split(ctx, t, p, cat)) Toast.makeText(ctx, "Сумма должна быть меньше ${fmtMoney(t.amount)}", Toast.LENGTH_SHORT).show()
+            else onClose()
+        }) { Text("Выделить") }
+    }, dismissButton = { TextButton(onClick = onClose) { Text("Отмена") } })
+}
+
+@Composable
+fun QuickMenu(t: Tx, onClose: () -> Unit, onEdit: () -> Unit) {
+    val ctx = LocalContext.current
+    val db = remember { Db.get(ctx) }
+    var split by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (split) { SplitDialog(t) { split = false; onClose() }; return }
+    AlertDialog(onDismissRequest = onClose,
+        title = { Text("${t.merchantRu.ifEmpty { t.merchant }.ifEmpty { t.category }} · ${fmtMoney(t.amount, t.currency)}", fontSize = 16.sp) },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (t.type == Types.EXPENSE || t.type == Types.INCOME) {
+                    Text("Категория (запомнится для магазина):", fontSize = 13.sp)
+                    CategoryPicker(t.type, t.category) { c ->
+                        t.category = c; db.update(t)
+                        if (t.merchant.isNotBlank() && !t.grp.startsWith("split:")) db.setRule(Parsers.merchantKey(t.merchant), null, c)
+                        db.changed(); Backup.schedule(ctx); onClose()
+                    }
+                }
+                if (t.type == Types.EXPENSE && !t.grp.startsWith("plan:")) OutlinedButton(onClick = { split = true }, Modifier.fillMaxWidth()) { Text("Выделить часть в другую категорию") }
+                OutlinedButton(onClick = onEdit, Modifier.fillMaxWidth()) { Text("Подробнее / изменить") }
+                OutlinedButton(onClick = { confirmDelete = true }, Modifier.fillMaxWidth()) { Text("Удалить", color = Red) }
+            }
+        },
+        confirmButton = { TextButton(onClick = onClose) { Text("Закрыть") } })
+    if (confirmDelete) AlertDialog(onDismissRequest = { confirmDelete = false }, title = { Text("Удалить операцию?") },
+        confirmButton = { TextButton(onClick = { Split.delete(ctx, t); confirmDelete = false; onClose() }) { Text("Удалить", color = Red) } },
+        dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Отмена") } })
+}
+
+// ============================ Categories management ============================
+
+@Composable
+fun CategoriesDialog(onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    val v = rememberDbVersion()
+    var tick by remember { mutableIntStateOf(0) }
+    var edit by remember { mutableStateOf<Pair<String, String>?>(null) }  // (old name or "", type)
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxWidth(0.95f).fillMaxHeight(0.9f), shape = MaterialTheme.shapes.large) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Категории", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("Нажми, чтобы переименовать, сменить значок или удалить.", fontSize = 12.sp, color = MaterialTheme.colorScheme.outline)
+                LazyColumn(Modifier.weight(1f)) {
+                    listOf(Types.EXPENSE to "Расходы", Types.INCOME to "Доходы").forEach { (type, title) ->
+                        item(key = "h$type$tick$v") { Text(title, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 10.dp)) }
+                        items(Cats.forType(type).map { it to type }, key = { "c${it.first}$tick" }) { (c, t) ->
+                            Row(Modifier.fillMaxWidth().clickable { edit = c to t }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(Cats.icon(c), fontSize = 18.sp, modifier = Modifier.width(36.dp))
+                                Text(c, Modifier.weight(1f))
+                                if (!Cats.isDefault(c)) Text("своя", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        item(key = "add$type$tick") {
+                            TextButton(onClick = { edit = "" to type }) { Text("+ Новая категория") }
+                        }
+                    }
+                }
+                TextButton(onClick = onClose, Modifier.align(Alignment.End)) { Text("Готово") }
+            }
+        }
+    }
+    edit?.let { (old, type) ->
+        var name by remember(old) { mutableStateOf(old) }
+        var icon by remember(old) { mutableStateOf(if (old.isEmpty()) "" else Cats.icon(old)) }
+        var confirmDel by remember(old) { mutableStateOf(false) }
+        AlertDialog(onDismissRequest = { edit = null }, title = { Text(if (old.isEmpty()) "Новая категория" else "Категория") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(name, { name = it }, label = { Text("Название") }, singleLine = true)
+                OutlinedTextField(icon, { icon = it.take(4) }, label = { Text("Значок (эмодзи)") }, singleLine = true)
+                Row { listOf("✈️", "🎁", "🐱", "🏋️", "🎮", "📚", "🖨️", "💇", "🚗", "🏖️").forEach { e -> TextButton(onClick = { icon = e }, contentPadding = PaddingValues(2.dp)) { Text(e) } } }
+                if (old.isNotEmpty() && old != "Другое") TextButton(onClick = { confirmDel = true }) { Text("Удалить категорию", color = Red) }
+                if (confirmDel) Text("Операции этой категории перейдут в «Другое».", fontSize = 12.sp)
+            }
+        }, confirmButton = {
+            TextButton(onClick = {
+                when {
+                    confirmDel -> Cats.delete(ctx, old)
+                    old.isEmpty() -> if (!Cats.add(ctx, name, icon, type)) { Toast.makeText(ctx, "Такая категория уже есть", Toast.LENGTH_SHORT).show(); return@TextButton }
+                    else -> Cats.rename(ctx, old, name, icon)
+                }
+                tick++; edit = null
+            }) { Text(if (confirmDel) "Удалить" else "Сохранить") }
+        }, dismissButton = { TextButton(onClick = { edit = null }) { Text("Отмена") } })
     }
 }

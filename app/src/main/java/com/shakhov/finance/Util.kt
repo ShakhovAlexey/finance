@@ -46,6 +46,26 @@ object Prefs {
         p.edit().putString("seenPkgs", o.toString()).apply()
     }
 
+    /** Settings that must survive a restore from the Google Drive copy. */
+    private val exported = listOf("cats_custom", "goals", "limits", "jointAccount", "calDay")
+    private val exportedSets = listOf("cats_hidden", "ignoredSigs", "pkgs")
+
+    fun export(ctx: Context): JSONObject {
+        val p = get(ctx); val o = JSONObject()
+        exported.forEach { k -> p.all[k]?.let { o.put(k, it) } }
+        exportedSets.forEach { k -> o.put(k, JSONArray(p.getStringSet(k, emptySet())!!.toList())) }
+        return o
+    }
+
+    fun import(ctx: Context, o: JSONObject?) {
+        if (o == null) return
+        val e = get(ctx).edit()
+        exported.forEach { k -> if (o.has(k)) { val v = o.get(k); if (v is Int) e.putInt(k, v) else e.putString(k, v.toString()) } }
+        exportedSets.forEach { k -> o.optJSONArray(k)?.let { a -> e.putStringSet(k, (0 until a.length()).map { a.getString(it) }.toSet()) } }
+        e.apply()
+        Cats.load(ctx)
+    }
+
     fun seenPkgs(ctx: Context): Map<String, String> {
         val o = JSONObject(get(ctx).getString("seenPkgs", "{}")!!)
         return o.keys().asSequence().associateWith { o.getString(it) }
@@ -78,6 +98,16 @@ object Migrate {
         }
         if (!p.getBoolean("repair_v7", false)) { Repair.run(ctx); p.edit().putBoolean("repair_v7", true).apply() }
         Transfers.link(ctx)
+        if (!p.getBoolean("plan_dups_v12", false)) {
+            // old statement imports left the full installment price as a normal expense next to the plan
+            val db = Db.get(ctx)
+            Plans.all(db).forEach { pl ->
+                db.query("type=? AND grp='' AND src=?", arrayOf(Types.EXPENSE, Src.STATEMENT.toString()))
+                    .filter { abs(it.amount - pl.total) < 0.005 && Parsers.merchantKey(it.merchant) == Parsers.merchantKey(pl.merchant) }
+                    .forEach { db.delete(it.id) }
+            }
+            p.edit().putBoolean("plan_dups_v12", true).apply(); db.changed()
+        }
         if (!p.getBoolean("names_v11", false)) {
             // replace machine transliterations («Аиис Нцрт») with known chain names
             val db = Db.get(ctx)
@@ -162,19 +192,23 @@ object Backup {
     private fun writeLocked(ctx: Context): Boolean {
         val u = uri(ctx) ?: return false
         return runCatching {
-            ctx.contentResolver.openOutputStream(u, "wt")!!.use { it.write(Db.get(ctx).exportJson().toString().toByteArray()) }
+            ctx.contentResolver.openOutputStream(u, "wt")!!.use { it.write(full(ctx).toString().toByteArray()) }
             Prefs.get(ctx).edit().putLong("backupAt", System.currentTimeMillis()).apply()
             true
         }.getOrDefault(false)
     }
 
+    fun full(ctx: Context): JSONObject = Db.get(ctx).exportJson().put("settings", Prefs.export(ctx))
+
     fun writeTo(ctx: Context, u: Uri): Boolean = runCatching {
-        ctx.contentResolver.openOutputStream(u, "wt")!!.use { it.write(Db.get(ctx).exportJson().toString().toByteArray()) }; true
+        ctx.contentResolver.openOutputStream(u, "wt")!!.use { it.write(full(ctx).toString().toByteArray()) }; true
     }.getOrDefault(false)
 
     fun restore(ctx: Context, u: Uri) {
         val s = ctx.contentResolver.openInputStream(u)!!.use { it.readBytes().toString(Charsets.UTF_8) }
-        Db.get(ctx).importJson(JSONObject(s))
+        val o = JSONObject(s)
+        Prefs.import(ctx, o.optJSONObject("settings"))
+        Db.get(ctx).importJson(o)
         Prefs.get(ctx).edit().putBoolean("seeded", true).apply()
     }
 

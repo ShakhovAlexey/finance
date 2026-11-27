@@ -151,17 +151,20 @@ object Ingest {
             val plan = Plans.fromPurchase(ctx, saved, maxOf(0, p.installments))
             return "Рассрочка ${fmtMoney(saved.amount)} · ${plan.name}" + if (plan.count == 0) " — укажи число платежей" else ""
         }
-        return "${fmtMoney(saved.amount, saved.currency)} · ${saved.merchantRu.ifEmpty { saved.merchant }.ifEmpty { saved.category }}"
+        val alert = Budget.limitAlert(ctx, Db.get(ctx).byId(saved.id) ?: saved)
+        return "${fmtMoney(saved.amount, saved.currency)} · ${saved.merchantRu.ifEmpty { saved.merchant }.ifEmpty { saved.category }}" +
+            (if (alert != null) "\n⚠ $alert" else "")
     }
 
     fun notifyRecorded(ctx: Context, msg: String) {
-        if (!Prefs.get(ctx).getBoolean("notify", true)) return
+        if (!Prefs.get(ctx).getBoolean("notify", true) && !msg.contains("лимит")) return
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel(CH, "Записанные операции", NotificationManager.IMPORTANCE_LOW))
         val pi = PendingIntent.getActivity(ctx, 0, Intent(ctx, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         runCatching {
             nm.notify((System.currentTimeMillis() % 100000).toInt(), NotificationCompat.Builder(ctx, CH)
-                .setSmallIcon(R.drawable.ic_stat).setContentTitle("Записано").setContentText(msg)
+                .setSmallIcon(R.drawable.ic_stat).setContentTitle("Записано").setContentText(msg.lines().first())
+                .setStyle(NotificationCompat.BigTextStyle().bigText(msg))
                 .setContentIntent(pi).setAutoCancel(true).build())
         }
     }

@@ -21,7 +21,7 @@ class UiTest {
         Db.get(ctx).insert(Tx(ts = oct, amount = 66.0, category = "Кафе и рестораны", merchant = "ארומה", merchantRu = "Арома, Нацрат-Илит (кафе)", src = Src.MANUAL))
         rule.onNodeWithText("Расход").assertExists()
         // go to October (old table data)
-        rule.onNodeWithContentDescription("Предыдущий месяц").performClick()
+        rule.onNode(hasScrollToNodeAction()).performTouchInput { swipeRight() }
         rule.waitForIdle()
         rule.onNode(hasScrollAction()).performScrollToNode(hasText("Арома, Нацрат-Илит (кафе)"))
         rule.onAllNodesWithText("Арома, Нацрат-Илит (кафе)").onFirst().performClick()
@@ -33,6 +33,8 @@ class UiTest {
         rule.onNodeWithText("Вручную").performClick()
         rule.onNodeWithText("Новая операция").assertExists()
         rule.onNodeWithText("Отмена").performClick()
+        rule.onNodeWithText("План").performClick()
+        rule.onNodeWithText("Копилки").assertExists()
         rule.onNodeWithText("Рассрочки").performClick()
         rule.onNodeWithText("Осталось выплатить").performClick()
         rule.onNode(hasScrollToNodeAction()).performScrollToNode(hasText("Добавить рассрочку вручную"))
